@@ -58,6 +58,7 @@ GRTAGS
 GTAGS
 lib*dll.def
 lib*.pc
+TAGS
 
 # Local excludes in root directory
 /GNUmakefile

@@ -55,9 +55,10 @@ function build_ext
 function build_master
 {
     cd $Cwd/
+    make distclean -sj
     export LD_LIBRARY_PATH=$GPROOT/ext/lib:$LD_LIBRARY_PATH
     ./configure --prefix=$GPROOT/core --with-perl --with-python --with-libxml --with-gssapi \
-        --without-zstd \
+        --without-zstd --disable-pxf \
         CFLAGS="-I$GPROOT/ext/include -fPIC" CXXFLAGS="-I$GPROOT/ext/include -fPIC" LDFLAGS="-L$GPROOT/ext/lib"
     make -sj
     make install
@@ -134,11 +135,9 @@ __END2__
     rm -f hostfile
 }
 
-
 [ $# -eq 0 ] && (usage; exit 1)
 
 action="build"
-
 while getopts "ht:" arg; do
   case $arg in
     t)
@@ -160,5 +159,3 @@ else
     echo "ERROR: unknown action "$action"."
     exit 1
 fi
-
-
