@@ -24,11 +24,13 @@ static void check_proper_datallowconn(ClusterInfo *cluster);
 static void check_for_prepared_transactions(ClusterInfo *cluster);
 static void check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster);
 static void check_for_tables_with_oids(ClusterInfo *cluster);
+static void check_for_composite_data_type_usage(ClusterInfo *cluster);
 static void check_for_reg_data_type_usage(ClusterInfo *cluster);
 static void check_for_jsonb_9_4_usage(ClusterInfo *cluster);
 static void check_for_pg_role_prefix(ClusterInfo *cluster);
+static void check_for_new_tablespace_dir(ClusterInfo *new_cluster);
 static char *get_canonical_locale_name(int category, const char *locale);
-
+static void check_for_appendonly_materialized_view_with_relfrozenxid(ClusterInfo *cluster);
 
 /*
  * fix_path_separator
@@ -87,10 +89,16 @@ check_and_dump_old_cluster(bool live_check, char **sequence_script_file_name)
 	/* Extract a list of databases and tables from the old cluster */
 	get_db_and_rel_infos(&old_cluster);
 
+	if (skip_checks())
+	{
+		prep_status("Skipping Consistency Checks");
+		check_ok();
+		goto dump_old_cluster;
+	}
+
 	init_tablespaces();
 
 	get_loadable_libraries();
-
 
 	/*
 	 * Check for various failure cases
@@ -99,6 +107,7 @@ check_and_dump_old_cluster(bool live_check, char **sequence_script_file_name)
 	check_is_install_user(&old_cluster);
 	check_proper_datallowconn(&old_cluster);
 	check_for_prepared_transactions(&old_cluster);
+	check_for_composite_data_type_usage(&old_cluster);
 	check_for_reg_data_type_usage(&old_cluster);
 	check_for_isn_and_int8_passing_mismatch(&old_cluster);
 
@@ -117,6 +126,14 @@ check_and_dump_old_cluster(bool live_check, char **sequence_script_file_name)
 	 */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 1100)
 		check_for_tables_with_oids(&old_cluster);
+
+	/*
+	 * PG 12 changed the 'sql_identifier' type storage to be based on name,
+	 * not varchar, which breaks on-disk format for existing data. So we need
+	 * to prevent upgrade when used in user objects (tables, indexes, ...).
+	 */
+	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 1100)
+		old_11_check_for_sql_identifier_data_type_usage(&old_cluster);
 
 	/*
 	 * Pre-PG 10 allowed tables with 'unknown' type columns and non WAL logged
@@ -150,51 +167,13 @@ check_and_dump_old_cluster(bool live_check, char **sequence_script_file_name)
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 804)
 		new_9_0_populate_pg_largeobject_metadata(&old_cluster, true);
 
-	/* old = PG 8.3 checks? */
-	/* 
-	 * GPDB: 9.5 removed the support for 8.3, we need to keep it to support upgrading
-	 * from GPDB 5
-	 */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 803)
+	/* For now, the issue exists only for Greenplum 6.x/PostgreSQL 9.4 */
+	if (GET_MAJOR_VERSION(old_cluster.major_version) == 904)
 	{
-		old_8_3_check_for_name_data_type_usage(&old_cluster);
-		old_8_3_check_for_tsquery_usage(&old_cluster);
-		old_8_3_check_ltree_usage(&old_cluster);
-		check_hash_partition_usage();
-		if (user_opts.check)
-		{
-			old_8_3_rebuild_tsvector_tables(&old_cluster, true);
-			old_8_3_invalidate_hash_gin_indexes(&old_cluster, true);
-			old_8_3_invalidate_bpchar_pattern_ops_indexes(&old_cluster, true);
-		}
-		else
-		{
-			/*
-			 * While we have the old server running, create the script to
-			 * properly restore its sequence values but we report this at the
-			 * end.
-			 */
-			*sequence_script_file_name =
-				old_8_3_create_sequence_script(&old_cluster);
-		}
-
-		old_GPDB5_check_for_unsupported_distribution_key_data_types();
+		check_for_appendonly_materialized_view_with_relfrozenxid(&old_cluster);
 	}
 
-	/*
-	 * Upgrading from Greenplum 4.3.x which is based on PostgreSQL 8.2.
-	 * Upgrading from one version of 4.3.x to another 4.3.x version is not
-	 * supported.
-	 */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) == 802)
-	{
-		old_8_3_check_for_name_data_type_usage(&old_cluster);
-	
-		old_GPDB4_check_for_money_data_type_usage();
-		old_GPDB4_check_no_free_aoseg();
-		check_hash_partition_usage();
-	}
-
+dump_old_cluster:
 	/*
 	 * While not a check option, we do this now because this is the only time
 	 * the old server is running.
@@ -232,6 +211,8 @@ check_new_cluster(void)
 	check_is_install_user(&new_cluster);
 
 	check_for_prepared_transactions(&new_cluster);
+
+	check_for_new_tablespace_dir(&new_cluster);
 }
 
 
@@ -240,9 +221,21 @@ report_clusters_compatible(void)
 {
 	if (user_opts.check)
 	{
-		pg_log(PG_REPORT, "\n*Clusters are compatible*\n");
+		if (get_check_fatal_occurred())
+		{
+			char		cwd[MAXPGPATH];
+			if (!getcwd(cwd, MAXPGPATH))
+				pg_fatal("could not determine current directory: %m\n");
+			canonicalize_path(cwd);
+
+			pg_log(PG_REPORT, "\n*Some cluster objects are not compatible*\n\npg_upgrade check output files are located:\n%s\n\n", cwd);
+		} else
+			pg_log(PG_REPORT, "\n*Clusters are compatible*\n");
+
 		/* stops new cluster */
 		stop_postmaster(false);
+		if (get_check_fatal_occurred())
+			exit(1);
 		exit(0);
 	}
 
@@ -263,32 +256,6 @@ issue_warnings_and_set_wal_level(char *sequence_script_file_name)
 	 */
 	start_postmaster(&new_cluster, true);
 
-	/* old = PG 8.2/GPDB 4.3 warnings */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) == 802)
-		new_gpdb5_0_invalidate_indexes();
-
-	/* GPDB_95_MERGE_FIXME: upstream 9.5 remove the support for 8.3, should we do the same? */
-	/* old = PG 8.3 warnings? */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 803)
-	{
-		/* restore proper sequence values using file created from old server */
-		if (sequence_script_file_name)
-		{
-			prep_status("Adjusting sequences");
-			exec_prog(UTILITY_LOG_FILE, NULL, true, true,
-					  "%s \"%s/psql\" " EXEC_PSQL_ARGS " %s -f \"%s\"",
-					  PG_OPTIONS_UTILITY_MODE_VERSION(new_cluster.major_version),
-					  new_cluster.bindir, cluster_conn_opts(&new_cluster),
-					  sequence_script_file_name);
-			unlink(sequence_script_file_name);
-			check_ok();
-		}
-
-		old_8_3_rebuild_tsvector_tables(&new_cluster, false);
-		old_8_3_invalidate_hash_gin_indexes(&new_cluster, false);
-		old_8_3_invalidate_bpchar_pattern_ops_indexes(&new_cluster, false);
-	}
-
 	/* GPDB_90_MERGE_FIXME: See earlier comment on large objects */
 	/* Create dummy large object permissions for old < PG 9.0? */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 804)
@@ -298,6 +265,8 @@ issue_warnings_and_set_wal_level(char *sequence_script_file_name)
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 906)
 		old_9_6_invalidate_hash_indexes(&new_cluster, false);
 
+	report_extension_updates(&new_cluster);
+
 	stop_postmaster(false);
 }
 
@@ -306,18 +275,10 @@ void
 output_completion_banner(char *analyze_script_file_name,
 						 char *deletion_script_file_name)
 {
-	/* Did we copy the free space files? */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) >= 804)
-		pg_log(PG_REPORT,
-			   "Optimizer statistics are not transferred by pg_upgrade so,\n"
-			   "once you start the new server, consider running:\n"
-			   "    %s\n\n", analyze_script_file_name);
-	else
-		pg_log(PG_REPORT,
-			   "Optimizer statistics and free space information are not transferred\n"
-			   "by pg_upgrade so, once you start the new server, consider running:\n"
-			   "    %s\n\n", analyze_script_file_name);
-
+	pg_log(PG_REPORT,
+		   "Optimizer statistics are not transferred by pg_upgrade so,\n"
+		   "once you start the new server, consider running:\n"
+		   "    %s\n\n", analyze_script_file_name);
 
 	if (deletion_script_file_name)
 		pg_log(PG_REPORT,
@@ -340,19 +301,6 @@ check_cluster_versions(void)
 
 	/* cluster versions should already have been obtained */
 	Assert(old_cluster.major_version != 0);
-	Assert(new_cluster.major_version != 0);
-
-	/*
-	 * Upgrading within a major version is a handy feature of pg_upgrade, but
-	 * we don't allow it for within 4.3.x clusters, 4.3.x can only be an old
-	 * version to be upgraded from.
-	 */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) == 802 &&
-		GET_MAJOR_VERSION(new_cluster.major_version) == 802)
-	{
-		pg_log(PG_FATAL,
-			   "old and new cluster cannot both be Greenplum 4.3.x installations\n");
-	}
 
 	/*
 	 * We allow upgrades from/to the same major version for alpha/beta
@@ -360,13 +308,25 @@ check_cluster_versions(void)
 	 */
 
 	/*
-	 * Upgrading from anything older than an 8.2 based Greenplum is not
-	 * supported. TODO: This needs to be amended to check for the actual
-	 * 4.3.x version we target and not a blanket 8.2 check, but for now
-	 * this will cover most cases.
+	 * Upgrading from anything older than an 8.3 based Greenplum (GPDB5) is not supported.
 	 */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) < 802)
-		pg_fatal("This utility can only upgrade from Greenplum version 4.3.x and later.\n");
+
+	if (GET_MAJOR_VERSION(old_cluster.major_version) < 803)
+		pg_fatal("This utility can only upgrade from Greenplum version 5 and later.\n");
+
+	/* Ensure binaries match the designated data directories */
+	if (GET_MAJOR_VERSION(old_cluster.major_version) !=
+		GET_MAJOR_VERSION(old_cluster.bin_version))
+		pg_fatal("Old cluster data and binary directories are from different major versions.\n");
+
+	if(is_skip_target_check())
+	{
+		check_ok();
+		return;
+	}
+
+	/* cluster versions should already have been obtained */
+	Assert(new_cluster.major_version != 0);
 
 	/* Only current PG version is supported as a target */
 	if (GET_MAJOR_VERSION(new_cluster.major_version) != GET_MAJOR_VERSION(PG_VERSION_NUM))
@@ -382,9 +342,6 @@ check_cluster_versions(void)
 		pg_fatal("This utility cannot be used to downgrade to older major Greenplum versions.\n");
 
 	/* Ensure binaries match the designated data directories */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) !=
-		GET_MAJOR_VERSION(old_cluster.bin_version))
-		pg_fatal("Old cluster data and binary directories are from different major versions.\n");
 	if (GET_MAJOR_VERSION(new_cluster.major_version) !=
 		GET_MAJOR_VERSION(new_cluster.bin_version))
 		pg_fatal("New cluster data and binary directories are from different major versions.\n");
@@ -398,18 +355,25 @@ check_cluster_compatibility(bool live_check)
 {
 	/* get/check pg_control data of servers */
 	get_control_data(&old_cluster, live_check);
-	get_control_data(&new_cluster, false);
-	check_control_data(&old_cluster.controldata, &new_cluster.controldata);
+
+	if(!is_skip_target_check())
+	{
+		get_control_data(&new_cluster, false);
+		check_control_data(&old_cluster.controldata, &new_cluster.controldata);
+	}
 
 	/* We read the real port number for PG >= 9.1 */
-	if (live_check && GET_MAJOR_VERSION(old_cluster.major_version) < 901 &&
+	if (live_check && GET_MAJOR_VERSION(old_cluster.major_version) <= 900 &&
 		old_cluster.port == DEF_PGUPORT)
 		pg_fatal("When checking a pre-PG 9.1 live old server, "
 				 "you must specify the old server's port number.\n");
 
-	if (live_check && old_cluster.port == new_cluster.port)
-		pg_fatal("When checking a live server, "
-				 "the old and new port numbers must be different.\n");
+	if(!is_skip_target_check())
+	{
+		if (live_check && old_cluster.port == new_cluster.port)
+			pg_fatal("When checking a live server, "
+					 "the old and new port numbers must be different.\n");
+	}
 }
 
 
@@ -428,10 +392,10 @@ check_locale_and_encoding(DbInfo *olddb, DbInfo *newdb)
 				 pg_encoding_to_char(olddb->db_encoding),
 				 pg_encoding_to_char(newdb->db_encoding));
 	if (!equivalent_locale(LC_COLLATE, olddb->db_collate, newdb->db_collate))
-		pg_fatal("lc_collate values for database \"%s\" do not match:  old \"%s\", new \"%s\"\n",
+		gp_fatal_log("lc_collate values for database \"%s\" do not match:  old \"%s\", new \"%s\"\n",
 				 olddb->db_name, olddb->db_collate, newdb->db_collate);
 	if (!equivalent_locale(LC_CTYPE, olddb->db_ctype, newdb->db_ctype))
-		pg_fatal("lc_ctype values for database \"%s\" do not match:  old \"%s\", new \"%s\"\n",
+		gp_fatal_log("lc_ctype values for database \"%s\" do not match:  old \"%s\", new \"%s\"\n",
 				 olddb->db_name, olddb->db_ctype, newdb->db_ctype);
 }
 
@@ -512,7 +476,7 @@ check_new_cluster_is_empty(void)
 		{
 			/* pg_largeobject and its index should be skipped */
 			if (strcmp(rel_arr->rels[relnum].nspname, "pg_catalog") != 0)
-				pg_fatal("New cluster database \"%s\" is not empty: found relation \"%s.%s\"\n",
+				gp_fatal_log("New cluster database \"%s\" is not empty: found relation \"%s.%s\"\n",
 						 new_cluster.dbarr.dbs[dbnum].db_name,
 						 rel_arr->rels[relnum].nspname,
 						 rel_arr->rels[relnum].relname);
@@ -608,19 +572,12 @@ create_script_for_cluster_analyze(char **analyze_script_file_name)
 			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %sthis script and run:%s\n",
 			ECHO_QUOTE, ECHO_QUOTE);
-	fprintf(script, "echo %s    \"%s/vacuumdb\" %s--all %s%s\n", ECHO_QUOTE,
-			new_cluster.bindir, user_specification.data,
-	/* Did we copy the free space files? */
-			(GET_MAJOR_VERSION(old_cluster.major_version) >= 804) ?
-			"--analyze-only" : "--analyze", ECHO_QUOTE);
+	fprintf(script, "echo %s    \"%s/vacuumdb\" %s--all --analyze-only%s\n", ECHO_QUOTE,
+			new_cluster.bindir, user_specification.data, ECHO_QUOTE);
 	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 
 	fprintf(script, "\"%s/vacuumdb\" %s--all --analyze-in-stages\n",
 			new_cluster.bindir, user_specification.data);
-	/* Did we copy the free space files? */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) < 804)
-		fprintf(script, "\"%s/vacuumdb\" %s--all\n", new_cluster.bindir,
-				user_specification.data);
 
 	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 	fprintf(script, "echo %sDone%s\n",
@@ -635,6 +592,44 @@ create_script_for_cluster_analyze(char **analyze_script_file_name)
 #endif
 
 	termPQExpBuffer(&user_specification);
+
+	check_ok();
+}
+
+/*
+ * A previous run of pg_upgrade might have failed and the new cluster
+ * directory recreated, but they might have forgotten to remove
+ * the new cluster's tablespace directories.  Therefore, check that
+ * new cluster tablespace directories do not already exist.  If
+ * they do, it would cause an error while restoring global objects.
+ * This allows the failure to be detected at check time, rather than
+ * during schema restore.
+ *
+ * Note, v8.4 has no tablespace_suffix, which is fine so long as the
+ * version being upgraded *to* has a suffix, since it's not allowed
+ * to pg_upgrade from a version to the same version if tablespaces are
+ * in use.
+ */
+static void
+check_for_new_tablespace_dir(ClusterInfo *new_cluster)
+{
+	int		tblnum;
+	char	new_tablespace_dir[MAXPGPATH];
+
+	prep_status("Checking for new cluster tablespace directories");
+
+	for (tblnum = 0; tblnum < os_info.num_old_tablespaces; tblnum++)
+	{
+		struct stat statbuf;
+
+		snprintf(new_tablespace_dir, MAXPGPATH, "%s%s",
+				os_info.old_tablespaces[tblnum],
+				new_cluster->tablespace_suffix);
+
+		if (stat(new_tablespace_dir, &statbuf) == 0 || errno != ENOENT)
+			pg_fatal("new cluster tablespace directory already exists: \"%s\"\n",
+					 new_tablespace_dir);
+	}
 
 	check_ok();
 }
@@ -794,7 +789,7 @@ check_is_install_user(ClusterInfo *cluster)
 	 */
 	if (PQntuples(res) != 1 ||
 		atooid(PQgetvalue(res, 0, 1)) != BOOTSTRAP_SUPERUSERID)
-		pg_fatal("database user \"%s\" is not the install user\n",
+		gp_fatal_log("database user \"%s\" is not the install user\n",
 				 os_info.user);
 
 	PQclear(res);
@@ -805,7 +800,7 @@ check_is_install_user(ClusterInfo *cluster)
 							"WHERE rolname !~ '^pg_'");
 
 	if (PQntuples(res) != 1)
-		pg_fatal("could not determine the number of users\n");
+		gp_fatal_log("could not determine the number of users\n");
 
 	/*
 	 * We only allow the install user in the new cluster because other defined
@@ -907,9 +902,9 @@ check_for_prepared_transactions(ClusterInfo *cluster)
 	if (PQntuples(res) != 0)
 	{
 		if (cluster == &old_cluster)
-			pg_fatal("The source cluster contains prepared transactions\n");
+			gp_fatal_log("The source cluster contains prepared transactions\n");
 		else
-			pg_fatal("The target cluster contains prepared transactions\n");
+			gp_fatal_log("The target cluster contains prepared transactions\n");
 	}
 
 	PQclear(res);
@@ -997,13 +992,14 @@ check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster)
 	if (found)
 	{
 		pg_log(PG_REPORT, "fatal\n");
-		pg_fatal("Your installation contains \"contrib/isn\" functions which rely on the\n"
-				 "bigint data type.  Your old and new clusters pass bigint values\n"
-				 "differently so this cluster cannot currently be upgraded.  You can\n"
-				 "manually upgrade databases that use \"contrib/isn\" facilities and remove\n"
-				 "\"contrib/isn\" from the old cluster and restart the upgrade.  A list of\n"
-				 "the problem functions is in the file:\n"
-				 "    %s\n\n", output_path);
+		gp_fatal_log(
+				"| Your installation contains \"contrib/isn\" functions which rely on the\n"
+				"| bigint data type.  Your old and new clusters pass bigint values\n"
+				"| differently so this cluster cannot currently be upgraded.  You can\n"
+				"| manually upgrade databases that use \"contrib/isn\" facilities and remove\n"
+				"| \"contrib/isn\" from the old cluster and restart the upgrade.  A list of\n"
+				"| the problem functions is in the file:\n"
+				"|     %s\n\n", output_path);
 	}
 	else
 		check_ok();
@@ -1076,16 +1072,74 @@ check_for_tables_with_oids(ClusterInfo *cluster)
 	if (found)
 	{
 		pg_log(PG_REPORT, "fatal\n");
-		pg_fatal("Your installation contains tables declared WITH OIDS, which is not supported\n"
-				 "anymore. Consider removing the oid column using\n"
-				 "    ALTER TABLE ... SET WITHOUT OIDS;\n"
-				 "A list of tables with the problem is in the file:\n"
-				 "    %s\n\n", output_path);
+		gp_fatal_log(
+				"| Your installation contains tables declared WITH OIDS, which is not supported\n"
+				"| anymore. Consider removing the oid column using\n"
+				"|     ALTER TABLE ... SET WITHOUT OIDS;\n"
+				"| A list of tables with the problem is in the file:\n"
+				"|     %s\n\n", output_path);
 	}
 	else
 		check_ok();
 }
 
+
+/*
+ * check_for_composite_data_type_usage()
+ *	Check for system-defined composite types used in user tables.
+ *
+ *	The OIDs of rowtypes of system catalogs and information_schema views
+ *	can change across major versions; unlike user-defined types, we have
+ *	no mechanism for forcing them to be the same in the new cluster.
+ *	Hence, if any user table uses one, that's problematic for pg_upgrade.
+ */
+static void
+check_for_composite_data_type_usage(ClusterInfo *cluster)
+{
+	bool		found;
+	Oid			firstUserOid;
+	char		output_path[MAXPGPATH];
+	char	   *base_query;
+
+	prep_status("Checking for system-defined composite types in user tables");
+
+	snprintf(output_path, sizeof(output_path), "tables_using_composite.txt");
+
+	/*
+	 * Look for composite types that were made during initdb *or* belong to
+	 * information_schema; that's important in case information_schema was
+	 * dropped and reloaded.
+	 *
+	 * The cutoff OID here should match the source cluster's value of
+	 * FirstNormalObjectId.  We hardcode it rather than using that C #define
+	 * because, if that #define is ever changed, our own version's value is
+	 * NOT what to use.  Eventually we may need a test on the source cluster's
+	 * version to select the correct value.
+	 */
+	firstUserOid = 16384;
+
+	base_query = psprintf("SELECT t.oid FROM pg_catalog.pg_type t "
+						  "LEFT JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid "
+						  " WHERE typtype = 'c' AND (t.oid < %u OR nspname = 'information_schema')",
+						  firstUserOid);
+
+	found = check_for_data_types_usage(cluster, base_query, output_path);
+
+	free(base_query);
+
+	if (found)
+	{
+		pg_log(PG_REPORT, "fatal\n");
+		pg_fatal("Your installation contains system-defined composite type(s) in user tables.\n"
+				 "These type OIDs are not stable across PostgreSQL versions,\n"
+				 "so this cluster cannot currently be upgraded.  You can\n"
+				 "drop the problem columns and restart the upgrade.\n"
+				 "A list of the problem columns is in the file:\n"
+				 "    %s\n\n", output_path);
+	}
+	else
+		check_ok();
+}
 
 /*
  * check_for_reg_data_type_usage()
@@ -1101,102 +1155,47 @@ check_for_tables_with_oids(ClusterInfo *cluster)
 static void
 check_for_reg_data_type_usage(ClusterInfo *cluster)
 {
-	int			dbnum;
-	FILE	   *script = NULL;
-	bool		found = false;
+	bool		found;
 	char		output_path[MAXPGPATH];
 
 	prep_status("Checking for reg* data types in user tables");
 
 	snprintf(output_path, sizeof(output_path), "tables_using_reg.txt");
 
-	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
-	{
-		PGresult   *res;
-		bool		db_used = false;
-		int			ntups;
-		int			rowno;
-		int			i_nspname,
-					i_relname,
-					i_attname;
-		DbInfo	   *active_db = &cluster->dbarr.dbs[dbnum];
-		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
-		/*
-		 * While several relkinds don't store any data, e.g. views, they can
-		 * be used to define data types of other columns, so we check all
-		 * relkinds.
-		 */
-		res = executeQueryOrDie(conn,
-								"SELECT n.nspname, c.relname, a.attname "
-								"FROM	pg_catalog.pg_class c, "
-								"		pg_catalog.pg_namespace n, "
-								"		pg_catalog.pg_attribute a, "
-								"		pg_catalog.pg_type t "
-								"WHERE	c.oid = a.attrelid AND "
-								"		NOT a.attisdropped AND "
-								"       a.atttypid = t.oid AND "
-								"       t.typnamespace = "
-								"           (SELECT oid FROM pg_namespace "
-								"            WHERE nspname = 'pg_catalog') AND"
-								"		t.typname IN ( "
-		/* regclass.oid is preserved, so 'regclass' is OK */
-								"           'regconfig', "
-								"           'regdictionary', "
-								"           'regnamespace', "
-								"           'regoper', "
-								"           'regoperator', "
-								"           'regproc', "
-								"           'regprocedure' "
-		/* regrole.oid is preserved, so 'regrole' is OK */
-		/* regtype.oid is preserved, so 'regtype' is OK */
-								"           %s "
-								"			) AND "
-								"		c.relnamespace = n.oid AND "
-							  "		n.nspname NOT IN ('pg_catalog', 'information_schema')",
-						/* GPDB 4.3 support */
-						GET_MAJOR_VERSION(old_cluster.major_version) == 802 ?
-							"" :
-							",'pg_catalog.regconfig'::pg_catalog.regtype::pg_catalog.text "
-							",'pg_catalog.regdictionary'::pg_catalog.regtype::pg_catalog.text ");
-
-		ntups = PQntuples(res);
-		i_nspname = PQfnumber(res, "nspname");
-		i_relname = PQfnumber(res, "relname");
-		i_attname = PQfnumber(res, "attname");
-		for (rowno = 0; rowno < ntups; rowno++)
-		{
-			found = true;
-			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
-				pg_fatal("could not open file \"%s\": %s\n",
-						 output_path, strerror(errno));
-			if (!db_used)
-			{
-				fprintf(script, "Database: %s\n", active_db->db_name);
-				db_used = true;
-			}
-			fprintf(script, "  %s.%s.%s\n",
-					PQgetvalue(res, rowno, i_nspname),
-					PQgetvalue(res, rowno, i_relname),
-					PQgetvalue(res, rowno, i_attname));
-		}
-
-		PQclear(res);
-
-		PQfinish(conn);
-	}
-
-	if (script)
-		fclose(script);
+	/*
+	 * Note: older servers will not have all of these reg* types, so we have
+	 * to write the query like this rather than depending on casts to regtype.
+	 */
+	found = check_for_data_types_usage(cluster,
+									   "SELECT oid FROM pg_catalog.pg_type t "
+									   "WHERE t.typnamespace = "
+									   "        (SELECT oid FROM pg_catalog.pg_namespace "
+									   "         WHERE nspname = 'pg_catalog') "
+									   "  AND t.typname IN ( "
+	/* pg_class.oid is preserved, so 'regclass' is OK */
+									   "           'regcollation', "
+									   "           'regconfig', "
+									   "           'regdictionary', "
+									   "           'regnamespace', "
+									   "           'regoper', "
+									   "           'regoperator', "
+									   "           'regproc', "
+									   "           'regprocedure' "
+	/* pg_authid.oid is preserved, so 'regrole' is OK */
+	/* pg_type.oid is (mostly) preserved, so 'regtype' is OK */
+									   "         )",
+									   output_path);
 
 	if (found)
 	{
 		pg_log(PG_REPORT, "fatal\n");
-		pg_fatal("Your installation contains one of the reg* data types in user tables.\n"
-				 "These data types reference system OIDs that are not preserved by\n"
-				 "pg_upgrade, so this cluster cannot currently be upgraded.  You can\n"
-				 "remove the problem tables and restart the upgrade.  A list of the problem\n"
-				 "columns is in the file:\n"
-				 "    %s\n\n", output_path);
+		gp_fatal_log(
+				"| Your installation contains one of the reg* data types in user tables.\n"
+				"| These data types reference system OIDs that are not preserved by\n"
+				"| pg_upgrade, so this cluster cannot currently be upgraded.  You can\n"
+				"| remove the problem tables and restart the upgrade.  A list of the problem\n"
+				"| columns is in the file:\n"
+				"|     %s\n\n", output_path);
 	}
 	else
 		check_ok();
@@ -1211,82 +1210,21 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 static void
 check_for_jsonb_9_4_usage(ClusterInfo *cluster)
 {
-	int			dbnum;
-	FILE	   *script = NULL;
-	bool		found = false;
 	char		output_path[MAXPGPATH];
 
 	prep_status("Checking for incompatible \"jsonb\" data type");
 
 	snprintf(output_path, sizeof(output_path), "tables_using_jsonb.txt");
 
-	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
-	{
-		PGresult   *res;
-		bool		db_used = false;
-		int			ntups;
-		int			rowno;
-		int			i_nspname,
-					i_relname,
-					i_attname;
-		DbInfo	   *active_db = &cluster->dbarr.dbs[dbnum];
-		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
-
-		/*
-		 * While several relkinds don't store any data, e.g. views, they can
-		 * be used to define data types of other columns, so we check all
-		 * relkinds.
-		 */
-		res = executeQueryOrDie(conn,
-								"SELECT n.nspname, c.relname, a.attname "
-								"FROM	pg_catalog.pg_class c, "
-								"		pg_catalog.pg_namespace n, "
-								"		pg_catalog.pg_attribute a "
-								"WHERE	c.oid = a.attrelid AND "
-								"		NOT a.attisdropped AND "
-								"		a.atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype AND "
-								"		c.relnamespace = n.oid AND "
-		/* exclude possible orphaned temp tables */
-								"		n.nspname !~ '^pg_temp_' AND "
-								"		n.nspname NOT IN ('pg_catalog', 'information_schema')");
-
-		ntups = PQntuples(res);
-		i_nspname = PQfnumber(res, "nspname");
-		i_relname = PQfnumber(res, "relname");
-		i_attname = PQfnumber(res, "attname");
-		for (rowno = 0; rowno < ntups; rowno++)
-		{
-			found = true;
-			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
-				pg_fatal("could not open file \"%s\": %s\n",
-						 output_path, strerror(errno));
-			if (!db_used)
-			{
-				fprintf(script, "Database: %s\n", active_db->db_name);
-				db_used = true;
-			}
-			fprintf(script, "  %s.%s.%s\n",
-					PQgetvalue(res, rowno, i_nspname),
-					PQgetvalue(res, rowno, i_relname),
-					PQgetvalue(res, rowno, i_attname));
-		}
-
-		PQclear(res);
-
-		PQfinish(conn);
-	}
-
-	if (script)
-		fclose(script);
-
-	if (found)
+	if (check_for_data_type_usage(cluster, "pg_catalog.jsonb", output_path))
 	{
 		pg_log(PG_REPORT, "fatal\n");
-		pg_fatal("Your installation contains the \"jsonb\" data type in user tables.\n"
-				 "The internal format of \"jsonb\" changed during 9.4 beta so this cluster cannot currently\n"
-				 "be upgraded.  You can remove the problem tables and restart the upgrade.  A list\n"
-				 "of the problem columns is in the file:\n"
-				 "    %s\n\n", output_path);
+		gp_fatal_log(
+				"| Your installation contains the \"jsonb\" data type in user tables.\n"
+				"| The internal format of \"jsonb\" changed during 9.4 beta so this cluster cannot currently\n"
+				"| be upgraded.  You can remove the problem tables and restart the upgrade.  A list\n"
+				"| of the problem columns is in the file:\n"
+				"|     %s\n\n", output_path);
 	}
 	else
 		check_ok();
@@ -1313,9 +1251,9 @@ check_for_pg_role_prefix(ClusterInfo *cluster)
 	if (PQntuples(res) != 0)
 	{
 		if (cluster == &old_cluster)
-			pg_fatal("The source cluster contains roles starting with \"pg_\"\n");
+			gp_fatal_log("The source cluster contains roles starting with \"pg_\"\n");
 		else
-			pg_fatal("The target cluster contains roles starting with \"pg_\"\n");
+			gp_fatal_log("The target cluster contains roles starting with \"pg_\"\n");
 	}
 
 	PQclear(res);
@@ -1361,4 +1299,117 @@ get_canonical_locale_name(int category, const char *locale)
 	pg_free(save);
 
 	return res;
+}
+
+/* Check for any materialized view of append only mode with relfrozenxid != 0
+ *
+ * A materialized view of append only mode must have invalid relfrozenxid (0).
+ * However, some views might have valid relfrozenxid due to a known code issue.
+ * We need to check the problematical view before upgrading.
+ * The problem can be fixed by issuing "REFRESH MATERIALIZED VIEW <viewname>"
+ * with latest code.
+ * See the PR for details:
+ *
+ * https://github.com/greenplum-db/gpdb/pull/11662/
+ */
+static void
+check_for_appendonly_materialized_view_with_relfrozenxid(ClusterInfo *cluster)
+{
+	FILE		*script = NULL;
+	char		output_path[MAXPGPATH];
+	bool		found = false;
+
+	prep_status("Checking for appendonly materialized view with relfrozenxid\n");
+
+	snprintf(output_path,
+				sizeof(output_path),
+				"appendonly_materialized_view_with_relfrozenxid.txt");
+	if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
+	{
+		pg_fatal("could not open file \"%s\": %s\n",
+					output_path,
+					strerror(errno));
+	}
+
+	for (int dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
+	{
+		DbInfo	   *active_db = &cluster->dbarr.dbs[dbnum];
+		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
+		PGresult   *res;
+		int			ntups = 0, i_relname = 0, i_relfxid = 0, i_nspname = 0;
+
+		fprintf(script, "Checking database: %s\n", active_db->db_name);
+		if (conn == NULL)
+		{
+			pg_fatal("Failed to connect to database %s\n", active_db->db_name);
+		}
+
+		// Detect any materialized view of append only mode (relstorage is
+		// RELSTORAGE_AOROWS or RELSTORAGE_AOCOLS) with relfrozenxid != 0
+		res = executeQueryOrDie(conn,
+								"select tb.relname, tb.relfrozenxid, tbsp.nspname "
+								" from pg_catalog.pg_class tb "
+								" left join pg_catalog.pg_namespace tbsp "
+								" on tb.relnamespace = tbsp.oid "
+								" where tb.relkind = 'm' "
+								" and (tb.relstorage = 'a' or tb.relstorage = 'c') "
+								" and tb.relfrozenxid::text <> '0';");
+		if (res == 0)
+		{
+			pg_fatal("Failed to query pg_catalog.pg_class on database \"%s\"\n",
+					 active_db->db_name);
+		}
+
+		ntups = PQntuples(res);
+		if (ntups == 0)
+		{
+			fprintf(script, "No problematical view detected.\n\n");
+		}
+		else
+		{
+			found = true;
+			i_relname = PQfnumber(res, "relname");
+			i_relfxid = PQfnumber(res, "relfrozenxid");
+			i_nspname = PQfnumber(res, "nspname");
+			for (int rowno = 0; rowno < ntups; rowno++)
+			{
+				fprintf(script,
+						"Detected view: %s, relfrozenxid: %s\n"
+						"Try to fix it by issuing \"REFRESH MATERIALIZED VIEW %s.%s\"\n",
+						PQgetvalue(res, rowno, i_relname),
+						PQgetvalue(res, rowno, i_relfxid),
+						PQgetvalue(res, rowno, i_nspname),
+						PQgetvalue(res, rowno, i_relname));
+			}
+			fprintf(script, "%d problematical view(s) detected.\n\n", ntups);
+		}
+		PQclear(res);
+
+		PQfinish(conn);
+	}
+
+	if(found)
+	{
+		fprintf(script,
+				"Note: A materialized view of append only mode must have invalid\n"
+				"relfrozenxid (0). However, view(s) with valid relfrozenxid was\n"
+				"detected.\n"
+				"Try to fix it by issuing \"REFRESH MATERIALIZED VIEW "
+				"<schemaname>.<viewname>\"\n"
+				"with latest GPDB 6 release and run the upgrading again.\n");
+	}
+
+	if (script)
+		fclose(script);
+
+	if(found)
+	{
+		pg_fatal("Detected appendonly materialized view with incorrect relfrozenxid.\n"
+					"See %s for details.\n",
+					output_path);
+	}
+	else
+	{
+		check_ok();
+	}
 }

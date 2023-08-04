@@ -32,10 +32,10 @@ namespace gpopt
 {
 // cleanup function for arrays
 class CExpression;
-typedef CDynamicPtrArray<CExpression, CleanupRelease> CExpressionArray;
+using CExpressionArray = CDynamicPtrArray<CExpression, CleanupRelease>;
 
 // array of arrays of expression pointers
-typedef CDynamicPtrArray<CExpressionArray, CleanupRelease> CExpressionArrays;
+using CExpressionArrays = CDynamicPtrArray<CExpressionArray, CleanupRelease>;
 
 class CGroupExpression;
 class CDrvdPropPlan;
@@ -107,11 +107,6 @@ private:
 	void PrintProperties(IOstream &os, CPrintPrefix &pfx) const;
 
 #endif	// GPOS_DEBUG
-
-#if 0
-	// check if the expression satisfies partition enforcer condition
-	BOOL FValidPartEnforcers(CDrvdPropCtxtPlan *pdpctxtplan);
-#endif
 
 	// check if the distributions of all children are compatible
 	BOOL FValidChildrenDistribution(CDrvdPropCtxtPlan *pdpctxtplan);
@@ -310,6 +305,9 @@ public:
 	ULONG DeriveTotalDistinctAggs();
 	BOOL DeriveHasMultipleDistinctAggs();
 	BOOL DeriveHasScalarArrayCmp();
+	BOOL DeriveHasScalarFuncProject();
+	BOOL DeriveContainsOnlyReplicationSafeAggFuncs();
+	ULONG DeriveTotalOrderedAggs();
 
 };	// class CExpression
 
@@ -322,16 +320,15 @@ operator<<(IOstream &os, CExpression &expr)
 }
 
 // hash map from ULONG to expression
-typedef CHashMap<ULONG, CExpression, gpos::HashValue<ULONG>,
-				 gpos::Equals<ULONG>, CleanupDelete<ULONG>,
-				 CleanupRelease<CExpression> >
-	UlongToExprMap;
+using UlongToExprMap =
+	CHashMap<ULONG, CExpression, gpos::HashValue<ULONG>, gpos::Equals<ULONG>,
+			 CleanupDelete<ULONG>, CleanupRelease<CExpression>>;
 
 // map iterator
-typedef CHashMapIter<ULONG, CExpression, gpos::HashValue<ULONG>,
-					 gpos::Equals<ULONG>, CleanupDelete<ULONG>,
-					 CleanupRelease<CExpression> >
-	UlongToExprMapIter;
+using UlongToExprMapIter =
+	CHashMapIter<ULONG, CExpression, gpos::HashValue<ULONG>,
+				 gpos::Equals<ULONG>, CleanupDelete<ULONG>,
+				 CleanupRelease<CExpression>>;
 
 }  // namespace gpopt
 

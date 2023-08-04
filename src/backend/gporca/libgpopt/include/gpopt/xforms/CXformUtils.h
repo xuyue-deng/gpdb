@@ -41,19 +41,19 @@ class CPartConstraint;
 class CTableDescriptor;
 
 // map of expression to array of expressions
-typedef CHashMap<CExpression, CExpressionArray, CExpression::HashValue,
-				 CUtils::Equals, CleanupRelease<CExpression>,
-				 CleanupRelease<CExpressionArray> >
-	ExprToExprArrayMap;
+using ExprToExprArrayMap =
+	CHashMap<CExpression, CExpressionArray, CExpression::HashValue,
+			 CUtils::Equals, CleanupRelease<CExpression>,
+			 CleanupRelease<CExpressionArray>>;
 
 // iterator of map of expression to array of expressions
-typedef CHashMapIter<CExpression, CExpressionArray, CExpression::HashValue,
-					 CUtils::Equals, CleanupRelease<CExpression>,
-					 CleanupRelease<CExpressionArray> >
-	ExprToExprArrayMapIter;
+using ExprToExprArrayMapIter =
+	CHashMapIter<CExpression, CExpressionArray, CExpression::HashValue,
+				 CUtils::Equals, CleanupRelease<CExpression>,
+				 CleanupRelease<CExpressionArray>>;
 
 // array of array of expressions
-typedef CDynamicPtrArray<CExpressionArray, CleanupRelease> CExpressionArrays;
+using CExpressionArrays = CDynamicPtrArray<CExpressionArray, CleanupRelease>;
 
 //---------------------------------------------------------------------------
 //	@class:
@@ -70,7 +70,7 @@ private:
 	enum EIndexCols
 	{
 		EicKey,
-		EicIncluded
+		EicKeyAndIncluded
 	};
 
 	// create a logical assert for the not nullable columns of the given table
@@ -144,7 +144,8 @@ private:
 											  CExpressionArray *pdrgpexprOuter,
 											  CExpressionArray *pdrgpexprInner,
 											  IMdIdArray *join_opfamilies,
-											  CXformResult *pxfres);
+											  CXformResult *pxfres,
+											  BOOL is_hash_join_null_aware);
 
 	// helper for transforming SubqueryAll into aggregate subquery
 	static void SubqueryAllToAgg(
@@ -183,9 +184,9 @@ private:
 	static CExpression *PexprBuildBtreeIndexPlan(
 		CMemoryPool *mp, CMDAccessor *md_accessor, CExpression *pexprGet,
 		ULONG ulOriginOpId, CExpressionArray *pdrgpexprConds,
-		CColRefSet *pcrsReqd, CColRefSet *pcrsScalarExpr,
-		CColRefSet *outer_refs, const IMDIndex *pmdindex,
-		const IMDRelation *pmdrel);
+		CColRefSet *pcrsScalarExpr, CColRefSet *outer_refs,
+		const IMDIndex *pmdindex, const IMDRelation *pmdrel,
+		BOOL indexForOrderBy = false);
 
 	// create a dynamic operator for a btree index plan
 	static CLogical *
@@ -247,9 +248,9 @@ private:
 	static CExpression *PexprBitmapSelectBestIndex(
 		CMemoryPool *mp, CMDAccessor *md_accessor, CExpression *pexprPred,
 		CTableDescriptor *ptabdesc, const IMDRelation *pmdrel,
-		CColRefArray *pdrgpcrOutput, CColRefSet *pcrsReqd,
-		CColRefSet *pcrsOuterRefs, CExpression **ppexprRecheck,
-		CExpression **ppexprResidual, BOOL alsoConsiderBTreeIndexes);
+		CColRefArray *pdrgpcrOutput, CColRefSet *pcrsOuterRefs,
+		CExpression **ppexprRecheck, CExpression **ppexprResidual,
+		BOOL alsoConsiderOtherIndexes);
 
 	// iterate over given hash map and return array of arrays of project elements sorted by the column id of the first entries
 	static CExpressionArrays *PdrgpdrgpexprSortedPrjElemsArray(
@@ -334,37 +335,6 @@ public:
 		CLogicalDML::EDMLOperator edmlop, CTableDescriptor *ptabdesc,
 		CColRefArray *colref_array, CColRef *pcrCtid, CColRef *pcrSegmentId);
 
-	// check whether there are any BEFORE or AFTER triggers on the
-	// given table that match the given DML operation
-	static BOOL FTriggersExist(CLogicalDML::EDMLOperator edmlop,
-							   CTableDescriptor *ptabdesc, BOOL fBefore);
-
-	// does the given trigger type match the given logical DML type
-	static BOOL FTriggerApplies(CLogicalDML::EDMLOperator edmlop,
-								const IMDTrigger *pmdtrigger);
-
-	// construct a trigger expression on top of the given expression
-	static CExpression *PexprRowTrigger(CMemoryPool *mp,
-										CExpression *pexprChild,
-										CLogicalDML::EDMLOperator edmlop,
-										IMDId *rel_mdid, BOOL fBefore,
-										CColRefArray *colref_array);
-
-	// construct a trigger expression on top of the given expression
-	static CExpression *PexprRowTrigger(CMemoryPool *mp,
-										CExpression *pexprChild,
-										CLogicalDML::EDMLOperator edmlop,
-										IMDId *rel_mdid, BOOL fBefore,
-										CColRefArray *pdrgpcrOld,
-										CColRefArray *pdrgpcrNew);
-
-	// construct a logical partition selector for the given table descriptor on top
-	// of the given child expression. The partition selection filters use columns
-	// from the given column array
-	static CExpression *PexprLogicalPartitionSelector(
-		CMemoryPool *mp, CTableDescriptor *ptabdesc, CColRefArray *colref_array,
-		CExpression *pexprChild);
-
 	// return partition filter expressions given a table
 	// descriptor and the given column references
 	static CExpressionArray *PdrgpexprPartEqFilters(
@@ -412,25 +382,25 @@ public:
 										  const IMDRelation *pmdrel);
 
 	// return the set of key columns from the given array of columns which appear
+	// in the index key and included columns
+	static CColRefSet *PcrsIndexKeysAndIncludes(CMemoryPool *mp,
+												CColRefArray *colref_array,
+												const IMDIndex *pmdindex,
+												const IMDRelation *pmdrel);
+
+	// return the set of key columns from the given array of columns which appear
 	// in the index key columns
 	static CColRefSet *PcrsIndexKeys(CMemoryPool *mp,
 									 CColRefArray *colref_array,
 									 const IMDIndex *pmdindex,
 									 const IMDRelation *pmdrel);
 
-	// return the set of key columns from the given array of columns which appear
-	// in the index included columns
-	static CColRefSet *PcrsIndexIncludedCols(CMemoryPool *mp,
-											 CColRefArray *colref_array,
-											 const IMDIndex *pmdindex,
-											 const IMDRelation *pmdrel);
-
 	// check if an index is applicable given the required, output and scalar
 	// expression columns
 	static BOOL FIndexApplicable(
 		CMemoryPool *mp, const IMDIndex *pmdindex, const IMDRelation *pmdrel,
-		CColRefArray *pdrgpcrOutput, CColRefSet *pcrsReqd,
-		CColRefSet *pcrsScalar, IMDIndex::EmdindexType emdindtype,
+		CColRefArray *pdrgpcrOutput, CColRefSet *pcrsScalar,
+		IMDIndex::EmdindexType emdindtype,
 		IMDIndex::EmdindexType altindtype = IMDIndex::EmdindSentinel);
 
 	// check whether a CTE should be inlined
@@ -473,13 +443,14 @@ public:
 	static CExpression *
 	PexprLogicalIndexGet(CMemoryPool *mp, CMDAccessor *md_accessor,
 						 CExpression *pexprGet, ULONG ulOriginOpId,
-						 CExpressionArray *pdrgpexprConds, CColRefSet *pcrsReqd,
+						 CExpressionArray *pdrgpexprConds,
 						 CColRefSet *pcrsScalarExpr, CColRefSet *outer_refs,
-						 const IMDIndex *pmdindex, const IMDRelation *pmdrel)
+						 const IMDIndex *pmdindex, const IMDRelation *pmdrel,
+						 BOOL indexForOrderBy = false)
 	{
 		return PexprBuildBtreeIndexPlan(
-			mp, md_accessor, pexprGet, ulOriginOpId, pdrgpexprConds, pcrsReqd,
-			pcrsScalarExpr, outer_refs, pmdindex, pmdrel);
+			mp, md_accessor, pexprGet, ulOriginOpId, pdrgpexprConds,
+			pcrsScalarExpr, outer_refs, pmdindex, pmdrel, indexForOrderBy);
 	}
 
 	// helper for creating bitmap bool op expressions
@@ -601,6 +572,10 @@ public:
 		CMemoryPool *mp, CExpression *lowerPartOfExpr, CExpression *topOfStack,
 		CExpression *exclusiveBottomOfStack);
 
+	static BOOL FCoverIndex(CMemoryPool *mp, CIndexDescriptor *pindexdesc,
+							CTableDescriptor *ptabdesc,
+							CColRefArray *pdrgpcrOutput);
+
 };	// class CXformUtils
 
 
@@ -653,12 +628,10 @@ CXformUtils::TransformImplementBinaryOp(CXformContext *pxfctxt,
 
 template <class T>
 void
-CXformUtils::AddHashOrMergeJoinAlternative(CMemoryPool *mp,
-										   CExpression *pexprJoin,
-										   CExpressionArray *pdrgpexprOuter,
-										   CExpressionArray *pdrgpexprInner,
-										   IMdIdArray *opfamilies,
-										   CXformResult *pxfres)
+CXformUtils::AddHashOrMergeJoinAlternative(
+	CMemoryPool *mp, CExpression *pexprJoin, CExpressionArray *pdrgpexprOuter,
+	CExpressionArray *pdrgpexprInner, IMdIdArray *opfamilies,
+	CXformResult *pxfres, BOOL is_hash_join_null_aware)
 {
 	GPOS_ASSERT(CUtils::FLogicalJoin(pexprJoin->Pop()));
 	GPOS_ASSERT(3 == pexprJoin->Arity());
@@ -671,8 +644,9 @@ CXformUtils::AddHashOrMergeJoinAlternative(CMemoryPool *mp,
 		(*pexprJoin)[ul]->AddRef();
 	}
 	CLogicalJoin *popLogicalJoin = CLogicalJoin::PopConvert(pexprJoin->Pop());
-	T *op = GPOS_NEW(mp) T(mp, pdrgpexprOuter, pdrgpexprInner, opfamilies,
-						   popLogicalJoin->OriginXform());
+	T *op =
+		GPOS_NEW(mp) T(mp, pdrgpexprOuter, pdrgpexprInner, opfamilies,
+					   is_hash_join_null_aware, popLogicalJoin->OriginXform());
 	CExpression *pexprResult = GPOS_NEW(mp)
 		CExpression(mp, op, (*pexprJoin)[0], (*pexprJoin)[1], (*pexprJoin)[2]);
 	pxfres->Add(pexprResult);
@@ -708,6 +682,15 @@ CXformUtils::ImplementHashJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 	// check if we have already computed hash join keys for the scalar child
 	LookupJoinKeys(mp, pexpr, &pdrgpexprOuter, &pdrgpexprInner,
 				   &join_opfamilies);
+
+	CExpression *pexprOuter = (*pexpr)[0];
+	CExpression *pexprInner = (*pexpr)[1];
+	CExpression *pexprScalar = (*pexpr)[2];
+	CExpressionArray *pdrgpexpr =
+		CCastUtils::PdrgpexprCastEquality(mp, pexprScalar);
+	ULONG ulPreds = pdrgpexpr->Size();
+	BOOL is_hash_join_null_aware = false;
+
 	if (nullptr != pdrgpexprOuter)
 	{
 		GPOS_ASSERT(nullptr != pdrgpexprInner);
@@ -724,17 +707,23 @@ CXformUtils::ImplementHashJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 		else
 		{
 			// we have computed hash join keys on scalar child before, reuse them
+			for (ULONG ul = 0; ul < ulPreds; ul++)
+			{
+				CExpression *pexprPred = (*pdrgpexpr)[ul];
+				if (!is_hash_join_null_aware)
+				{
+					is_hash_join_null_aware = CPredicateUtils::FINDF(pexprPred);
+				}
+			}
+
 			AddHashOrMergeJoinAlternative<T>(mp, pexpr, pdrgpexprOuter,
 											 pdrgpexprInner, join_opfamilies,
-											 pxfres);
+											 pxfres, is_hash_join_null_aware);
 		}
 
+		pdrgpexpr->Release();
 		return;
 	}
-
-	CExpression *pexprOuter = (*pexpr)[0];
-	CExpression *pexprInner = (*pexpr)[1];
-	CExpression *pexprScalar = (*pexpr)[2];
 
 	// split the predicate into arrays of conjuncts based on if they are
 	// output from inner or outer child
@@ -743,18 +732,21 @@ CXformUtils::ImplementHashJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 
 	if (GPOS_FTRACE(EopttraceConsiderOpfamiliesForDistribution))
 	{
+		CRefCount::SafeRelease(join_opfamilies);
 		join_opfamilies = GPOS_NEW(mp) IMdIdArray(mp);
 	}
 
-	CExpressionArray *pdrgpexpr =
-		CCastUtils::PdrgpexprCastEquality(mp, pexprScalar);
-	ULONG ulPreds = pdrgpexpr->Size();
 	for (ULONG ul = 0; ul < ulPreds; ul++)
 	{
 		CExpression *pexprPred = (*pdrgpexpr)[ul];
 		if (CPhysicalJoin::FHashJoinCompatible(pexprPred, pexprOuter,
 											   pexprInner))
 		{
+			if (!is_hash_join_null_aware)
+			{
+				is_hash_join_null_aware = CPredicateUtils::FINDF(pexprPred);
+			}
+
 			CExpression *pexprPredInner;
 			CExpression *pexprPredOuter;
 			IMDId *mdid_scop;
@@ -799,7 +791,7 @@ CXformUtils::ImplementHashJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 	{
 		AddHashOrMergeJoinAlternative<T>(mp, pexprResult, pdrgpexprOuter,
 										 pdrgpexprInner, join_opfamilies,
-										 pxfres);
+										 pxfres, is_hash_join_null_aware);
 	}
 	else
 	{
@@ -849,9 +841,9 @@ CXformUtils::ImplementMergeJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 		else
 		{
 			// we have computed join keys on scalar child before, reuse them
-			AddHashOrMergeJoinAlternative<T>(mp, pexpr, pdrgpexprOuter,
-											 pdrgpexprInner, join_opfamilies,
-											 pxfres);
+			AddHashOrMergeJoinAlternative<T>(
+				mp, pexpr, pdrgpexprOuter, pdrgpexprInner, join_opfamilies,
+				pxfres, true /*is_hash_join_null_aware*/);
 		}
 
 		return;
@@ -932,17 +924,17 @@ CXformUtils::ImplementMergeJoin(CXformContext *pxfctxt, CXformResult *pxfres,
 	// Add an alternative only if we found at least one merge-joinable predicate
 	if (0 != pdrgpexprOuter->Size())
 	{
-		AddHashOrMergeJoinAlternative<T>(mp, pexprResult, pdrgpexprOuter,
-										 pdrgpexprInner, join_opfamilies,
-										 pxfres);
+		AddHashOrMergeJoinAlternative<T>(
+			mp, pexprResult, pdrgpexprOuter, pdrgpexprInner, join_opfamilies,
+			pxfres, true /*is_hash_join_null_aware*/);
 	}
 	else
 	{
 		// clean up
 		pdrgpexprOuter->Release();
 		pdrgpexprInner->Release();
-		CRefCount::SafeRelease(join_opfamilies);
 	}
+	CRefCount::SafeRelease(join_opfamilies);
 
 	pexprResult->Release();
 }

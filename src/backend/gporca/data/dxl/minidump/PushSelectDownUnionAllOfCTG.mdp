@@ -25,7 +25,7 @@
         <dxl:Commutator Mdid="0.521.1.0"/>
         <dxl:InverseOp Mdid="0.525.1.0"/>
       </dxl:GPDBScalarOp>
-      <dxl:GPDBFunc Mdid="0.65.1.0" Name="int4eq" ReturnsSet="false" Stability="Immutable" DataAccess="NoSQL" IsStrict="true">
+      <dxl:GPDBFunc Mdid="0.65.1.0" Name="int4eq" ReturnsSet="false" Stability="Immutable" IsStrict="true">
         <dxl:ResultType Mdid="0.16.1.0"/>
       </dxl:GPDBFunc>
       <dxl:Type Mdid="0.20.1.0" Name="Int8" IsRedistributable="true" IsHashable="true" IsMergeJoinable="true" IsComposite="false" IsFixedLength="true" Length="8" PassByValue="true">
@@ -107,8 +107,13 @@
         <dxl:GroupingColumns/>
         <dxl:ProjList>
           <dxl:ProjElem ColId="11" Alias="sum">
-            <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Normal">
+            <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Normal" AggKind="n" AggArgTypes="">
+              <dxl:ValuesList ParamType="aggargs">
               <dxl:Ident ColId="2" ColName="field_1" TypeMdid="0.23.1.0"/>
+              </dxl:ValuesList>
+              <dxl:ValuesList ParamType="aggdirectargs"/>
+              <dxl:ValuesList ParamType="aggorder"/>
+              <dxl:ValuesList ParamType="aggdistinct"/>
             </dxl:AggFunc>
           </dxl:ProjElem>
         </dxl:ProjList>
@@ -209,7 +214,7 @@
         </dxl:LogicalSelect>
       </dxl:LogicalGroupBy>
     </dxl:Query>
-    <dxl:Plan Id="0" SpaceSize="988020">
+    <dxl:Plan Id="0" SpaceSize="283008">
       <dxl:Aggregate AggregationStrategy="Plain" StreamSafe="false">
         <dxl:Properties>
           <dxl:Cost StartupCost="0" TotalCost="0.001436" Rows="1.000000" Width="8"/>
@@ -217,8 +222,13 @@
         <dxl:GroupingColumns/>
         <dxl:ProjList>
           <dxl:ProjElem ColId="10" Alias="sum">
-            <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Normal">
+            <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Normal" AggKind="n" AggArgTypes="">
+              <dxl:ValuesList ParamType="aggargs">
               <dxl:Ident ColId="1" ColName="field_1" TypeMdid="0.23.1.0"/>
+              </dxl:ValuesList>
+              <dxl:ValuesList ParamType="aggdirectargs"/>
+              <dxl:ValuesList ParamType="aggorder"/>
+              <dxl:ValuesList ParamType="aggdistinct"/>
             </dxl:AggFunc>
           </dxl:ProjElem>
         </dxl:ProjList>

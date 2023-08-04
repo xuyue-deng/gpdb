@@ -18,6 +18,7 @@
 #include "executor/execdesc.h"
 #include "utils/faultinjector.h"
 #include "utils/portal.h"
+#include "storage/latch.h"
 
 struct Port;
 struct QueryDesc;
@@ -46,11 +47,13 @@ typedef struct Gang
 
 extern int qe_identifier;
 
-extern int host_segments;
+extern int host_primary_segment_count;
 extern int ic_htab_size;
 
 extern MemoryContext GangContext;
 extern Gang *CurrentGangCreating;
+
+extern WaitEventSet *DispWaitSet;
 
 /*
  * cdbgang_createGang:
@@ -98,6 +101,8 @@ extern bool segment_failure_due_to_missing_writer(const char *error_message);
  */
 extern void cdbgang_parse_gpqeid_params(struct Port *port, const char *gpqeid_value);
 
+extern void resetSessionForPrimaryGangLoss(void);
+
 /*
  * MPP Worker Process information
  *
@@ -126,5 +131,8 @@ typedef struct CdbProcess
 } CdbProcess;
 
 typedef Gang *(*CreateGangFunc)(List *segments, SegmentType segmentType);
+
+extern Datum gp_backend_info(PG_FUNCTION_ARGS);
+extern void printCreateGangTime(int sliceId, Gang *gang);
 
 #endif   /* _CDBGANG_H_ */

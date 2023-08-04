@@ -57,9 +57,9 @@ using namespace gpdxl;
 using namespace gpnaucrates;
 
 // hash map mapping CColRef -> CDXLNode
-typedef CHashMap<CColRef, CDXLNode, CColRef::HashValue, CColRef::Equals,
-				 CleanupNULL<CColRef>, CleanupRelease<CDXLNode> >
-	ColRefToDXLNodeMap;
+using ColRefToDXLNodeMap =
+	CHashMap<CColRef, CDXLNode, CColRef::HashValue, CColRef::Equals,
+			 CleanupNULL<CColRef>, CleanupRelease<CDXLNode>>;
 
 //---------------------------------------------------------------------------
 //	@class:
@@ -98,8 +98,8 @@ private:
 	// segment ids on target system
 	IntPtrArray *m_pdrgpiSegments;
 
-	// id of master node
-	INT m_iMasterId;
+	// id of coordinator node
+	INT m_iCoordinatorId;
 
 	// private copy ctor
 	CTranslatorExprToDXL(const CTranslatorExprToDXL &);
@@ -332,6 +332,19 @@ private:
 		CDistributionSpecArray *pdrgpdsBaseTables, ULONG *pulNonGatherMotions,
 		BOOL *pfDML);
 
+	// translate a dynamic foreign scan
+	CDXLNode *PdxlnDynamicForeignScan(CExpression *pexprDFS,
+									  CColRefArray *colref_array,
+									  CDistributionSpecArray *pdrgpdsBaseTables,
+									  ULONG *pulNonGatherMotions, BOOL *pfDML);
+
+	// translate a dynamic foreign scan with a scalar condition
+	CDXLNode *PdxlnDynamicForeignScan(CExpression *pexprDFS,
+									  CColRefArray *colref_array,
+									  CDistributionSpecArray *pdrgpdsBaseTables,
+									  CExpression *pexprScalarCond,
+									  CDXLPhysicalProperties *dxl_properties);
+
 	// Construct a table descr for a child partition
 	CTableDescriptor *MakeTableDescForPart(const IMDRelation *part,
 										   CTableDescriptor *root_table_desc);
@@ -347,17 +360,29 @@ private:
 		CDistributionSpecArray *pdrgpdsBaseTables, CExpression *pexprScalar,
 		CDXLPhysicalProperties *dxl_properties);
 
-	// translate a dynamic index scan based on passed properties
+	// translate a dynamic [only] index scan based on passed properties
 	CDXLNode *PdxlnDynamicIndexScan(CExpression *pexprDIS,
 									CColRefArray *colref_array,
 									CDXLPhysicalProperties *dxl_properties,
-									CReqdPropPlan *prpp);
+									CReqdPropPlan *prpp, BOOL indexOnly);
 
 	// translate a dynamic index scan
 	CDXLNode *PdxlnDynamicIndexScan(CExpression *pexprDIS,
 									CColRefArray *colref_array,
 									CDistributionSpecArray *pdrgpdsBaseTables,
 									ULONG *pulNonGatherMotions, BOOL *pfDML);
+
+	// translate a dynamic index scan based on passed properties
+	CDXLNode *PdxlnDynamicIndexOnlyScan(CExpression *pexprDIS,
+										CColRefArray *colref_array,
+										CDXLPhysicalProperties *dxl_properties,
+										CReqdPropPlan *prpp);
+
+	// translate a dynamic index scan
+	CDXLNode *PdxlnDynamicIndexOnlyScan(
+		CExpression *pexprDIS, CColRefArray *colref_array,
+		CDistributionSpecArray *pdrgpdsBaseTables, ULONG *pulNonGatherMotions,
+		BOOL *pfDML);
 
 	// translate a const table get into a result node
 	CDXLNode *PdxlnResultFromConstTableGet(
@@ -407,11 +432,6 @@ private:
 						  CDistributionSpecArray *pdrgpdsBaseTables,
 						  ULONG *pulNonGatherMotions, BOOL *pfDML);
 
-	// translate a row trigger operator
-	CDXLNode *PdxlnRowTrigger(CExpression *pexpr, CColRefArray *colref_array,
-							  CDistributionSpecArray *pdrgpdsBaseTables,
-							  ULONG *pulNonGatherMotions, BOOL *pfDML);
-
 	// translate a scalar If statement
 	CDXLNode *PdxlnScIfStmt(CExpression *pexprScIf);
 
@@ -435,6 +455,8 @@ private:
 
 	// translate a scalar constant
 	CDXLNode *PdxlnScConst(CExpression *pexprScConst);
+
+	CDXLNode *PdxlnScSortGroupClause(CExpression *pexprScSortGroupClause);
 
 	// translate a scalar coalesce
 	CDXLNode *PdxlnScCoalesce(CExpression *pexprScCoalesce);
@@ -480,6 +502,8 @@ private:
 
 	// translate a scalar array coerce expr with element coerce function
 	CDXLNode *PdxlnScArrayCoerceExpr(CExpression *pexprScArrayCoerceExpr);
+
+	CDXLNode *PdxlnValuesList(CExpression *pexpr);
 
 	// translate an array
 	CDXLNode *PdxlnArray(CExpression *pexpr);
@@ -531,16 +555,6 @@ private:
 									const CColRefArray *part_colrefs,
 									const CColRefArray *root_colrefs,
 									CExpression *pred);
-
-	CDXLNode *PdxlnBitmapIndexProbeForChildPart(
-		const ColRefToUlongMap *root_col_mapping,
-		const CColRefArray *part_colrefs, const CColRefArray *root_colrefs,
-		const IMDRelation *part, CExpression *pexprBitmapIndexProbe);
-
-	CDXLNode *PdxlnBitmapIndexPathForChildPart(
-		const ColRefToUlongMap *root_col_mapping,
-		const CColRefArray *part_colrefs, const CColRefArray *root_colrefs,
-		const IMDRelation *part, CExpression *pexprBitmapIndexPath);
 
 	// translate a project list expression into a DXL proj list node
 	// according to the order specified in the dynamic array
@@ -621,7 +635,10 @@ private:
 	CDXLNode *PdxlnProjectBoolConst(CDXLNode *dxlnode, BOOL value);
 
 	// helper to build a Result expression with project list restricted to required column
-	CDXLNode *PdxlnRestrictResult(CDXLNode *dxlnode, CColRef *colref);
+	CDXLNode *PdxlnRestrictResult(CDXLNode *dxlnode, const CColRef *colref);
+
+	// helper to build a Result expression with project list restricted to required columns
+	CDXLNode *PdxlnRestrictResult(CDXLNode *dxlnode, const CColRefSet *colrefs);
 
 	//	helper to build subplans from correlated LOJ
 	void BuildSubplansForCorrelatedLOJ(

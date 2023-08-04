@@ -1138,7 +1138,7 @@
         </dxl:StatsBucket>
       </dxl:ColumnStatistics>
       <dxl:RelationStatistics Mdid="2.17165.1.1" Name="lineitem" Rows="60398.000000"/>
-      <dxl:Relation Mdid="0.17165.1.1" Name="lineitem" IsTemporary="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="22,16">
+      <dxl:Relation Mdid="6.17165.1.1" Name="lineitem" IsTemporary="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="22,16">
         <dxl:Columns>
           <dxl:Column Name="l_orderkey" Attno="1" Mdid="0.23.1.0" Nullable="false" ColWidth="4">
             <dxl:DefaultValue/>
@@ -1211,7 +1211,6 @@
           </dxl:Column>
         </dxl:Columns>
         <dxl:IndexInfoList/>
-        <dxl:Triggers/>
         <dxl:CheckConstraints/>
       </dxl:Relation>
       <dxl:ColumnStatistics Mdid="1.17165.1.1.22" Name="gp_segment_id" Width="4.000000"/>
@@ -1340,11 +1339,16 @@
         <dxl:GroupingColumns/>
         <dxl:ProjList>
           <dxl:ProjElem ColId="24" Alias="revenue">
-            <dxl:AggFunc AggMdid="0.2114.1.0" AggDistinct="false" AggStage="Normal">
+            <dxl:AggFunc AggMdid="0.2114.1.0" AggDistinct="false" AggStage="Normal" AggKind="n" AggArgTypes="">
+              <dxl:ValuesList ParamType="aggargs">
               <dxl:OpExpr OperatorName="*" OperatorMdid="0.1760.1.0">
                 <dxl:Ident ColId="6" ColName="l_extendedprice" TypeMdid="0.1700.1.0"/>
                 <dxl:Ident ColId="7" ColName="l_discount" TypeMdid="0.1700.1.0"/>
               </dxl:OpExpr>
+              </dxl:ValuesList>
+              <dxl:ValuesList ParamType="aggdirectargs"/>
+              <dxl:ValuesList ParamType="aggorder"/>
+              <dxl:ValuesList ParamType="aggdistinct"/>
             </dxl:AggFunc>
           </dxl:ProjElem>
         </dxl:ProjList>
@@ -1372,7 +1376,7 @@
             </dxl:Comparison>
           </dxl:And>
           <dxl:LogicalGet>
-            <dxl:TableDescriptor Mdid="0.17165.1.1" TableName="lineitem">
+            <dxl:TableDescriptor Mdid="6.17165.1.1" TableName="lineitem">
               <dxl:Columns>
                 <dxl:Column ColId="1" Attno="1" ColName="l_orderkey" TypeMdid="0.23.1.0"/>
                 <dxl:Column ColId="2" Attno="2" ColName="l_partkey" TypeMdid="0.23.1.0"/>
@@ -1411,8 +1415,13 @@
         <dxl:GroupingColumns/>
         <dxl:ProjList>
           <dxl:ProjElem ColId="23" Alias="revenue">
-            <dxl:AggFunc AggMdid="0.2114.1.0" AggDistinct="false" AggStage="Final">
+            <dxl:AggFunc AggMdid="0.2114.1.0" AggDistinct="false" AggStage="Final" AggKind="n" AggArgTypes="">
+              <dxl:ValuesList ParamType="aggargs">
               <dxl:Ident ColId="24" ColName="ColRef_0024" TypeMdid="0.1700.1.0"/>
+              </dxl:ValuesList>
+              <dxl:ValuesList ParamType="aggdirectargs"/>
+              <dxl:ValuesList ParamType="aggorder"/>
+              <dxl:ValuesList ParamType="aggdistinct"/>
             </dxl:AggFunc>
           </dxl:ProjElem>
         </dxl:ProjList>
@@ -1435,11 +1444,16 @@
             <dxl:GroupingColumns/>
             <dxl:ProjList>
               <dxl:ProjElem ColId="24" Alias="ColRef_0024">
-                <dxl:AggFunc AggMdid="0.2114.1.0" AggDistinct="false" AggStage="Partial">
+                <dxl:AggFunc AggMdid="0.2114.1.0" AggDistinct="false" AggStage="Partial" AggKind="n" AggArgTypes="">
+                  <dxl:ValuesList ParamType="aggargs">
                   <dxl:OpExpr OperatorName="*" OperatorMdid="0.1760.1.0">
                     <dxl:Ident ColId="5" ColName="l_extendedprice" TypeMdid="0.1700.1.0"/>
                     <dxl:Ident ColId="6" ColName="l_discount" TypeMdid="0.1700.1.0"/>
                   </dxl:OpExpr>
+                  </dxl:ValuesList>
+                  <dxl:ValuesList ParamType="aggdirectargs"/>
+                  <dxl:ValuesList ParamType="aggorder"/>
+                  <dxl:ValuesList ParamType="aggdistinct"/>
                 </dxl:AggFunc>
               </dxl:ProjElem>
             </dxl:ProjList>
@@ -1480,7 +1494,7 @@
                   </dxl:Comparison>
                 </dxl:And>
               </dxl:Filter>
-              <dxl:TableDescriptor Mdid="0.17165.1.1" TableName="lineitem">
+              <dxl:TableDescriptor Mdid="6.17165.1.1" TableName="lineitem">
                 <dxl:Columns>
                   <dxl:Column ColId="0" Attno="1" ColName="l_orderkey" TypeMdid="0.23.1.0"/>
                   <dxl:Column ColId="1" Attno="2" ColName="l_partkey" TypeMdid="0.23.1.0"/>

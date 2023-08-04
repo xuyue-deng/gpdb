@@ -45,8 +45,13 @@ const CDouble CCostModelParamsGPDB::DIndexBlockCostUnitVal = 1.27e-06;
 // index filtering cost unit
 const CDouble CCostModelParamsGPDB::DIndexFilterCostUnitVal = 1.65e-04;
 
-// index scan cost unit per tuple per width
+// index scan cost unit per tuple per width. includes the cost to read from the
+// index and the heap.
 const CDouble CCostModelParamsGPDB::DIndexScanTupCostUnitVal = 3.66e-06;
+
+// index only scan cost unit per tuple per width. includes only the cost to
+// read from the index, _not_ the heap.
+const CDouble CCostModelParamsGPDB::DIndexOnlyScanTupCostUnitVal = 3.66e-06;
 
 // index scan random IO factor
 const CDouble CCostModelParamsGPDB::DIndexScanTupRandomFactorVal = 6.0;
@@ -183,6 +188,9 @@ const CDouble CCostModelParamsGPDB::DBitmapScanRebindCost(0.06);
 // see CCostModelGPDB::CostHashJoin() for why this is needed
 const CDouble CCostModelParamsGPDB::DPenalizeHJSkewUpperLimit(10.0);
 
+// default scalar func cost
+const CDouble CCostModelParamsGPDB::DScalarFuncCost(1.0e-04);
+
 #define GPOPT_COSTPARAM_NAME_MAX_LENGTH 80
 
 // parameter names in the same order of param enumeration
@@ -238,6 +246,7 @@ const CHAR rgszCostParamNames[CCostModelParamsGPDB::EcpSentinel]
 								 "BitmapPageCostLargerNDV",
 								 "BitmapPageCostSmallerNDV",
 								 "BitmapNDVThreshold",
+								 "ScalarFuncCostUnit",
 };
 
 //---------------------------------------------------------------------------
@@ -288,6 +297,9 @@ CCostModelParamsGPDB::CCostModelParamsGPDB(CMemoryPool *mp) : m_mp(mp)
 	m_rgpcp[EcpIndexScanTupCostUnit] = GPOS_NEW(mp) SCostParam(
 		EcpIndexScanTupCostUnit, DIndexScanTupCostUnitVal,
 		DIndexScanTupCostUnitVal - 1.0, DIndexScanTupCostUnitVal + 1.0);
+	m_rgpcp[EcpIndexOnlyScanTupCostUnit] = GPOS_NEW(mp) SCostParam(
+		EcpIndexOnlyScanTupCostUnit, DIndexOnlyScanTupCostUnitVal,
+		DIndexOnlyScanTupCostUnitVal - 1.0, DIndexOnlyScanTupCostUnitVal + 1.0);
 	m_rgpcp[EcpIndexScanTupRandomFactor] = GPOS_NEW(mp) SCostParam(
 		EcpIndexScanTupRandomFactor, DIndexScanTupRandomFactorVal,
 		DIndexScanTupRandomFactorVal - 1.0, DIndexScanTupRandomFactorVal + 1.0);
@@ -428,6 +440,10 @@ CCostModelParamsGPDB::CCostModelParamsGPDB(CMemoryPool *mp) : m_mp(mp)
 	m_rgpcp[EcpPenalizeHJSkewUpperLimit] = GPOS_NEW(mp) SCostParam(
 		EcpPenalizeHJSkewUpperLimit, DPenalizeHJSkewUpperLimit,
 		DPenalizeHJSkewUpperLimit - 1.0, DPenalizeHJSkewUpperLimit + 1.0);
+
+	m_rgpcp[EcpScalarFuncCost] =
+		GPOS_NEW(mp) SCostParam(EcpScalarFuncCost, DScalarFuncCost,
+								DScalarFuncCost - 0.0, DScalarFuncCost + 0.0);
 }
 
 
@@ -571,12 +587,16 @@ CCostModelParamsGPDB::Equals(ICostModelParams *pcm) const
 {
 	CCostModelParamsGPDB *pcmgOther = dynamic_cast<CCostModelParamsGPDB *>(pcm);
 	if (nullptr == pcmgOther)
+	{
 		return false;
+	}
 
 	for (ULONG ul = 0U; ul < GPOS_ARRAY_SIZE(m_rgpcp); ul++)
 	{
 		if (!m_rgpcp[ul]->Equals(pcmgOther->m_rgpcp[ul]))
+		{
 			return false;
+		}
 	}
 
 	return true;

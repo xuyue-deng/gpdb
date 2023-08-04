@@ -90,9 +90,9 @@ public:
 		ExfInnerJoin2IndexGetApply____removed,
 		ExfInnerJoin2DynamicIndexGetApply____removed,
 		ExfInnerApplyWithOuterKey2InnerJoin,
-		ExfInnerJoin2NLJoin,
+		ExfInnerJoin2NLJoin____removed,
 		ExfImplementIndexApply,
-		ExfInnerJoin2HashJoin,
+		ExfInnerJoin2HashJoin____removed,
 		ExfInnerApply2InnerJoin,
 		ExfInnerApply2InnerJoinNoCorrelations,
 		ExfImplementInnerCorrelatedApply,
@@ -134,7 +134,7 @@ public:
 		ExfDelete2DML,
 		ExfUpdate2DML,
 		ExfImplementDML,
-		ExfImplementRowTrigger,
+		ExfImplementRowTrigger____removed,
 		ExfImplementSplit,
 		ExfJoinCommutativity,
 		ExfJoinAssociativity,
@@ -177,7 +177,7 @@ public:
 		ExfImplementCTEProducer,
 		ExfImplementCTEConsumer,
 		ExfExpandFullOuterJoin,
-		ExfExternalGet2ExternalScan,
+		ExfForeignGet2ForeignScan,
 		ExfSelect2BitmapBoolOp,
 		ExfSelect2DynamicBitmapBoolOp,
 		ExfImplementBitmapTableGet,
@@ -222,6 +222,13 @@ public:
 		ExfExpandDynamicGetWithExternalPartitions____removed,
 		ExfLeftJoin2RightJoin,
 		ExfRightOuterJoin2HashJoin,
+		ExfImplementInnerJoin,
+		ExfDynamicForeignGet2DynamicForeignScan,
+		ExfExpandDynamicGetWithForeignPartitions,
+		ExfPushJoinBelowLeftUnionAll,
+		ExfPushJoinBelowRightUnionAll,
+		ExfLimit2IndexGet,
+		ExfDynamicIndexGet2DynamicIndexOnlyScan,
 		ExfInvalid,
 		ExfSentinel = ExfInvalid
 	};
@@ -308,6 +315,9 @@ public:
 	// equality function over xform ids
 	static BOOL FEqualIds(const CHAR *szIdOne, const CHAR *szIdTwo);
 
+	// returns a set containing all xforms related to nl join
+	// caller takes ownership of the returned set
+	static CBitSet *PbsNLJoinXforms(CMemoryPool *mp);
 
 	// returns a set containing all xforms related to index join
 	// caller takes ownership of the returned set
@@ -352,8 +362,8 @@ operator<<(IOstream &os, CXform &xform)
 }
 
 // shorthands for enum sets and iterators of xform ids
-typedef CEnumSet<CXform::EXformId, CXform::ExfSentinel> CXformSet;
-typedef CEnumSetIter<CXform::EXformId, CXform::ExfSentinel> CXformSetIter;
+using CXformSet = CEnumSet<CXform::EXformId, CXform::ExfSentinel>;
+using CXformSetIter = CEnumSetIter<CXform::EXformId, CXform::ExfSentinel>;
 }  // namespace gpopt
 
 

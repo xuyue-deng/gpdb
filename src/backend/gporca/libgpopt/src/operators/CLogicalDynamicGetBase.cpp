@@ -219,67 +219,13 @@ CLogicalDynamicGetBase::DerivePartitionInfo(CMemoryPool *mp,
 	return ppartinfo;
 }
 
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CLogicalDynamicGetBase::PstatsDeriveFilter
-//
-//	@doc:
-//		Derive stats from base table using filters on partition and/or index columns
-//
-//---------------------------------------------------------------------------
-IStatistics *
-CLogicalDynamicGetBase::PstatsDeriveFilter(CMemoryPool *mp,
-										   CExpressionHandle &exprhdl,
-										   CExpression *pexprFilter) const
-{
-	CExpression *pexprFilterNew = nullptr;
-
-	if (nullptr != pexprFilter)
-	{
-		pexprFilterNew = pexprFilter;
-		pexprFilterNew->AddRef();
-	}
-
-	CColRefSet *pcrsStat = GPOS_NEW(mp) CColRefSet(mp);
-
-	if (nullptr != pexprFilterNew)
-	{
-		pcrsStat->Include(pexprFilterNew->DeriveUsedColumns());
-	}
-
-	// requesting statistics on distribution columns to estimate data skew
-	if (nullptr != m_pcrsDist)
-	{
-		pcrsStat->Include(m_pcrsDist);
-	}
-
-
-	CStatistics *pstatsFullTable = dynamic_cast<CStatistics *>(
-		PstatsBaseTable(mp, exprhdl, m_ptabdesc, pcrsStat));
-
-	pcrsStat->Release();
-
-	if (nullptr == pexprFilterNew || pexprFilterNew->DeriveHasSubquery())
-	{
-		return pstatsFullTable;
-	}
-
-	CStatsPred *pred_stats = CStatsPredUtils::ExtractPredStats(
-		mp, pexprFilterNew, nullptr /*outer_refs*/
-	);
-	pexprFilterNew->Release();
-
-	IStatistics *result_stats = CFilterStatsProcessor::MakeStatsFilter(
-		mp, pstatsFullTable, pred_stats, true /* do_cap_NDVs */);
-	pred_stats->Release();
-	pstatsFullTable->Release();
-
-	return result_stats;
-}
-
 // Construct a mapping from each column in root table to an index in each child
-// partition's table descr by matching column names
+// partition's table descr by matching column names For each partition, this
+// iterates over each child partition and compares the column names and creates
+// a mapping. In the common case, the root and child partition's columns have
+// the same colref. However, if they've been dropped/swapped, the mapping will
+// be different. This method is fairly expensive, as it's building multiple hashmaps
+// and ends up getting called from a few different places in the codebase.
 ColRefToUlongMapArray *
 CLogicalDynamicGetBase::ConstructRootColMappingPerPart(
 	CMemoryPool *mp, CColRefArray *root_cols, IMdIdArray *partition_mdids)
@@ -287,6 +233,15 @@ CLogicalDynamicGetBase::ConstructRootColMappingPerPart(
 	CMDAccessor *mda = COptCtxt::PoctxtFromTLS()->Pmda();
 
 	ColRefToUlongMapArray *part_maps = GPOS_NEW(mp) ColRefToUlongMapArray(mp);
+
+	// Build hashmap of colname to the index
+	ColNameToIndexMap *root_mapping = GPOS_NEW(mp) ColNameToIndexMap(mp);
+	for (ULONG i = 0; i < root_cols->Size(); ++i)
+	{
+		CColRef *root_colref = (*root_cols)[i];
+		root_mapping->Insert(root_colref->Name().Pstr(), GPOS_NEW(mp) ULONG(i));
+	}
+
 	for (ULONG ul = 0; ul < partition_mdids->Size(); ++ul)
 	{
 		IMDId *part_mdid = (*partition_mdids)[ul];
@@ -295,35 +250,28 @@ CLogicalDynamicGetBase::ConstructRootColMappingPerPart(
 		GPOS_ASSERT(nullptr != partrel);
 
 		ColRefToUlongMap *mapping = GPOS_NEW(mp) ColRefToUlongMap(mp);
-
-		for (ULONG i = 0; i < root_cols->Size(); ++i)
+		// The root mapping cannot contain dropped columns, but may be
+		// in a different order than the child cols.Iterate through each of the child
+		// cols, and retrieve the corresponding index in the parent table
+		for (ULONG j = 0; j < partrel->ColumnCount(); ++j)
 		{
-			CColRef *root_colref = (*root_cols)[i];
+			const IMDColumn *coldesc = partrel->GetMdCol(j);
+			const CWStringConst *colname = coldesc->Mdname().GetMDName();
 
-			BOOL found_mapping = false;
-			for (ULONG j = 0, idx = 0; j < partrel->ColumnCount(); ++j, ++idx)
+			if (coldesc->IsDropped())
 			{
-				const IMDColumn *coldesc = partrel->GetMdCol(j);
-				const CWStringConst *colname = coldesc->Mdname().GetMDName();
-
-				if (coldesc->IsDropped())
-				{
-					--idx;
-					continue;
-				}
-
-				if (colname->Equals(root_colref->Name().Pstr()))
-				{
-					// Found the corresponding column in the child partition
-					// Save the index in the mapping
-					mapping->Insert(root_colref, GPOS_NEW(mp) ULONG(idx));
-					found_mapping = true;
-					break;
-				}
+				continue;
 			}
 
-			if (!found_mapping)
+			ULONG *root_idx = root_mapping->Find(colname);
+			if (nullptr != root_idx)
 			{
+				mapping->Insert((*root_cols)[*root_idx],
+								GPOS_NEW(mp) ULONG(*root_idx));
+			}
+			else
+			{
+				root_mapping->Release();
 				GPOS_RAISE(
 					CException::ExmaInvalid, CException::ExmiInvalid,
 					GPOS_WSZ_LIT(
@@ -332,5 +280,6 @@ CLogicalDynamicGetBase::ConstructRootColMappingPerPart(
 		}
 		part_maps->Append(mapping);
 	}
+	root_mapping->Release();
 	return part_maps;
 }

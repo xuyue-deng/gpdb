@@ -12,10 +12,9 @@ else
 fi
 
 brew install bash-completion
-brew install conan
 brew install cmake # gporca
 brew install xerces-c #gporca
-brew install libyaml # enables `--enable-mapreduce`
+brew install libyaml # gpfdist
 brew install libevent # gpfdist
 brew install apr # gpfdist
 brew install apr-util # gpfdist
@@ -29,6 +28,11 @@ brew link --force apr-util
 brew install postgresql
 
 brew install python3
+
+# Due to recent update on OS net-tools package. Mac doesn't have support for ss and ip by default.
+# Hence as a workaround installing iproute2mac for ip support and creating soft link for ss support
+brew install iproute2mac
+sudo ln -s /usr/sbin/netstat /usr/local/bin/ss
 
 echo 127.0.0.1$'\t'$HOSTNAME | sudo tee -a /etc/hosts
 

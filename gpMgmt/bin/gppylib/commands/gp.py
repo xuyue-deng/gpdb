@@ -77,9 +77,35 @@ def getPostmasterPID(hostname, datadir):
     try:
         cmd.run(validateAfter=True)
         sout=cmd.get_results().stdout.lstrip(' ')
-        return int(sout.split('START_CMD_OUTPUT')[1].split()[1])
+        return int(sout.split('START_CMD_OUTPUT\n')[1].split()[1])
     except:
         return -1
+
+
+"""
+Given the segment data directory and the hostname,
+return all the postgres processes associated
+with that segment as a list.
+Returns an empty list if there is any error.
+"""
+def get_postgres_segment_processes(datadir, host):
+    postmaster_pid = getPostmasterPID(host, datadir)
+    if postmaster_pid == -1:
+        return []
+
+    postgres_pids = [postmaster_pid]
+    cmd = Command("get children pids", ("pgrep -P {0}".format(postmaster_pid)), ctxt=REMOTE, remoteHost=host)
+    cmd.run()
+
+    if cmd.get_results().rc == 0:
+        pids = cmd.get_results().stdout.split()
+        for pid in pids:
+            try:
+                postgres_pids.append(int(pid))
+            except ValueError:
+                pass # Ignore any error while converting to int from str
+
+    return postgres_pids
 
 #-----------------------------------------------
 
@@ -176,13 +202,8 @@ class PgCtlBackendOptions(CmdArgs):
 
     """
 
-    def __init__(self, port):
-        """
-        @param port: backend port
-        """
-        CmdArgs.__init__(self, [
-            "-p", str(port),
-        ])
+    def __init__(self):
+        CmdArgs.__init__(self, [])
 
     #
     # coordinator/segment-specific options
@@ -305,7 +326,7 @@ class CoordinatorStart(Command):
         self.wrapper_args=wrapper_args
 
         # build backend options
-        b = PgCtlBackendOptions(port)
+        b = PgCtlBackendOptions()
         if utilityMode:
             b.set_utility()
         else:
@@ -363,7 +384,7 @@ class SegmentStart(Command):
         datadir = gpdb.getSegmentDataDirectory()
 
         # build backend options
-        b = PgCtlBackendOptions(port)
+        b = PgCtlBackendOptions()
         if utilityMode:
             b.set_utility()
         else:
@@ -427,39 +448,6 @@ class SegmentIsShutDown(Command):
         cmd=SegmentIsShutDown(name,directory)
         cmd.run(validateAfter=True)
 
-#-----------------------------------------------
-class SegmentRewind(Command):
-    """
-    SegmentRewind is used to run pg_rewind using source server.
-    """
-
-    def __init__(self, name, target_host, target_datadir,
-                 source_host, source_port, progress_file,
-                 verbose=False, ctxt=REMOTE):
-
-        # Construct the source server libpq connection string
-        # We set application_name here so gpstate can identify whether an
-        # incremental recovery is occurring.
-        source_server = "host={} port={} dbname=template1 application_name={}".format(
-            source_host, source_port, RECOVERY_REWIND_APPNAME
-        )
-
-        # Build the pg_rewind command. Do not run pg_rewind if standby.signal
-        # file exists in target data directory because the target instance can
-        # be started up normally as a mirror for WAL replication catch up.
-        rewind_cmd = '[ -f %s/standby.signal ] || PGOPTIONS="-c gp_role=utility" $GPHOME/bin/pg_rewind --write-recovery-conf --slot="internal_wal_replication_slot" --source-server="%s" --target-pgdata=%s' % (target_datadir, source_server, target_datadir)
-
-        if verbose:
-            rewind_cmd = rewind_cmd + ' --progress'
-
-        # pg_rewind prints progress updates to stdout, but it also prints
-        # errors relating to relevant failures(like it will not rewind due to
-        # a corrupted pg_control file) to stderr.
-        rewind_cmd = rewind_cmd + " > {} 2>&1".format(pipes.quote(progress_file))
-
-        self.cmdStr = rewind_cmd
-
-        Command.__init__(self, name, self.cmdStr, ctxt, target_host)
 
 #
 # list of valid segment statuses that can be requested
@@ -1003,6 +991,42 @@ class ConfigureNewSegment(Command):
         return result
 
 #-----------------------------------------------
+
+
+class GpSegSetupRecovery(Command):
+    """
+    Format gpsegsetuprecovery call for running recovery setup on remoteHost for the segments passed in confinfo
+    """
+    def __init__(self, name, confinfo, logdir, batchSize, verbose, remoteHost, forceoverwrite):
+        cmdStr = _get_cmd_for_recovery_wrapper('gpsegsetuprecovery', confinfo, logdir, batchSize, verbose,forceoverwrite)
+        Command.__init__(self, name, cmdStr, REMOTE, remoteHost, start_new_session=True)
+
+
+class GpSegRecovery(Command):
+    """
+    Format gpsegrecovery call for running pg_basebackup/pg_rewind on remoteHost for the segments passed in confinfo
+    """
+    def __init__(self, name, confinfo, logdir, batchSize, verbose, remoteHost, forceoverwrite, era):
+        cmdStr = _get_cmd_for_recovery_wrapper('gpsegrecovery', confinfo, logdir, batchSize, verbose, forceoverwrite, era)
+        Command.__init__(self, name, cmdStr, REMOTE, remoteHost, start_new_session=True)
+
+
+def _get_cmd_for_recovery_wrapper(wrapper_filename, confinfo, logdir, batchSize, verbose, forceoverwrite, era=None):
+    cmdStr = '$GPHOME/sbin/{}.py -c {} -l {}'.format(wrapper_filename, pipes.quote(confinfo), pipes.quote(logdir))
+
+    if verbose:
+        cmdStr += ' -v'
+    if batchSize:
+        cmdStr += ' -b %s' % batchSize
+    if forceoverwrite:
+        cmdStr += " --force-overwrite"
+    if era:
+        cmdStr += " --era={}".format(era)
+
+    return cmdStr
+
+
+#-----------------------------------------------
 class GpVersion(Command):
     def __init__(self,name,gphome,ctxt=LOCAL,remoteHost=None):
         # XXX this should make use of the gphome that was passed
@@ -1143,8 +1167,8 @@ def distribute_tarball(queue,list,tarball):
             hostname = db.getSegmentHostName()
             datadir = db.getSegmentDataDirectory()
             (head,tail)=os.path.split(datadir)
-            scp_cmd=Scp(name="copy coordinator",srcFile=tarball,dstHost=hostname,dstFile=head)
-            queue.addCommand(scp_cmd)
+            rsync_cmd=Rsync(name="copy coordinator",srcFile=tarball,dstHost=hostname,dstFile=head, ignore_times=True, whole_file=True)
+            queue.addCommand(rsync_cmd)
         queue.join()
         queue.check_results()
         logger.debug("distributeTarBall finished")
@@ -1536,12 +1560,12 @@ def chk_local_db_running(datadir, port):
     tmpfile_exists = os.path.exists("/tmp/.s.PGSQL.%d" % port)
     lockfile_exists = os.path.exists(get_lockfile_name(port))
 
-    netstat_port_active = PgPortIsActive.local('check ss for postmaster port',"/tmp/.s.PGSQL.%d" % port, port)
+    ss_port_active = PgPortIsActive.local('check ss for postmaster port',"/tmp/.s.PGSQL.%d" % port, port)
 
     logger.debug("postmaster_pid_exists: %s tmpfile_exists: %s lockfile_exists: %s ss port: %s  pid: %s" %\
-                (postmaster_pid_exists, tmpfile_exists, lockfile_exists, netstat_port_active, pid_value))
+                (postmaster_pid_exists, tmpfile_exists, lockfile_exists, ss_port_active, pid_value))
 
-    return (postmaster_pid_exists, tmpfile_exists, lockfile_exists, netstat_port_active, pid_value)
+    return (postmaster_pid_exists, tmpfile_exists, lockfile_exists, ss_port_active, pid_value)
 
 def get_lockfile_name(port):
     return "/tmp/.s.PGSQL.%d.lock" % port
@@ -1602,6 +1626,21 @@ def createTempDirectoryName(coordinatorDataDirectory, tempDirPrefix):
                                 datetime.datetime.now().strftime('%m%d%Y'),
                                 os.getpid())
 
+"""
+Check if gprecoverseg process is running or not by
+reading the PID file inside gprecoverseg.lock directory.
+Returns True if the process is running or False otherwise.
+"""
+def is_gprecoverseg_running():
+    gprecoverseg_pidfile = os.path.join(get_coordinatordatadir(), 'gprecoverseg.lock', 'PID')
+    try:
+        with open(gprecoverseg_pidfile) as pidfile:
+            gprecoverseg_pid = pidfile.read()
+    except Exception:
+        return False
+
+    return check_pid(gprecoverseg_pid)
+
 #-------------------------------------------------------------------------
 class GpRecoverSeg(Command):
    """
@@ -1630,7 +1669,7 @@ class IfAddrs:
             args = cmd
 
         result = subprocess.check_output(args).decode()
-        return result.split('START_CMD_OUTPUT')[1].strip().splitlines()
+        return result.split('START_CMD_OUTPUT\n')[1].splitlines()
 
 if __name__ == '__main__':
 

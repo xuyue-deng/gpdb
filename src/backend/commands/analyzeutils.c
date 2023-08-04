@@ -22,6 +22,7 @@
 #include "lib/binaryheap.h"
 #include "miscadmin.h"
 #include "parser/parse_oper.h"
+#include "postmaster/autovacuum.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/fmgroids.h"
@@ -1029,10 +1030,19 @@ getBucketSizes(const HeapTuple *heaptupleStats, const float4 *relTuples, int nPa
  *	needs_sample() -- checks if the analyze requires sampling the actual data
  */
 bool
-needs_sample(VacAttrStats **vacattrstats, int attr_cnt)
+needs_sample(Relation rel, VacAttrStats **vacattrstats, int attr_cnt)
 {
 	Assert(vacattrstats != NULL);
+	List *statext_oids;
 	int			i;
+
+	/*
+	 * Do not sample partitioned tables during autovacuum for any reason.
+	 * It can take a long time and is IO intensive, and we'd only hit this case
+	 * for collecting extended stats
+	 */
+	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE && IsAutoVacuumWorkerProcess())
+		return false;
 
 	for (i = 0; i < attr_cnt; i++)
 	{
@@ -1040,6 +1050,15 @@ needs_sample(VacAttrStats **vacattrstats, int attr_cnt)
 		if (!vacattrstats[i]->merge_stats)
 			return true;
 	}
+
+	/* we must acquire sample rows to build extend statisics */
+	statext_oids = RelationGetStatExtList(rel);
+	if (statext_oids != NIL)
+	{
+		list_free(statext_oids);
+		return true;
+	}
+
 	return false;
 }
 

@@ -22,7 +22,7 @@ template <class T, void (*CleanupFn)(T *)>
 class CDynamicPtrArray;
 
 // comparison function signature
-typedef INT (*CompareFn)(const void *, const void *);
+using CompareFn = INT (*)(const void *, const void *);
 
 // frequently used destroy functions
 
@@ -60,18 +60,18 @@ CleanupRelease(T *elem)
 // commonly used array types
 
 // arrays of unsigned integers
-typedef CDynamicPtrArray<ULONG, CleanupDelete> ULongPtrArray;
+using ULongPtrArray = CDynamicPtrArray<ULONG, CleanupDelete>;
 // array of unsigned integer arrays
-typedef CDynamicPtrArray<ULongPtrArray, CleanupRelease> ULongPtr2dArray;
+using ULongPtr2dArray = CDynamicPtrArray<ULongPtrArray, CleanupRelease>;
 
 // arrays of integers
-typedef CDynamicPtrArray<INT, CleanupDelete> IntPtrArray;
+using IntPtrArray = CDynamicPtrArray<INT, CleanupDelete>;
 
 // array of strings
-typedef CDynamicPtrArray<CWStringBase, CleanupDelete> StringPtrArray;
+using StringPtrArray = CDynamicPtrArray<CWStringBase, CleanupDelete>;
 
 // arrays of chars
-typedef CDynamicPtrArray<CHAR, CleanupDelete> CharPtrArray;
+using CharPtrArray = CDynamicPtrArray<CHAR, CleanupDelete>;
 
 //---------------------------------------------------------------------------
 //	@class:
@@ -158,10 +158,9 @@ public:
 		  m_expansion_factor(std::max((ULONG) 2, expansion_factor)),
 		  m_elems(nullptr)
 	{
-		GPOS_ASSERT(nullptr != CleanupFn &&
-					"No valid destroy function specified");
-
 		// do not allocate in constructor; defer allocation to first insertion
+		static_assert(nullptr != CleanupFn,
+					  "No valid destroy function specified");
 	}
 
 	// dtor

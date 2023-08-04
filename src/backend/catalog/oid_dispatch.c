@@ -5,12 +5,12 @@
  *
  *
  * In Greenplum, it's important that most objects, like relations, functions,
- * operators, have the same OIDs in the master and all QE nodes.  Otherwise
- * query plans generated in the master will not work on the QE nodes, because
- * they use the master's OIDs to refer to objects.
+ * operators, have the same OIDs in the coordinator and all QE nodes.  Otherwise
+ * query plans generated in the coordinator will not work on the QE nodes, because
+ * they use the coordinator's OIDs to refer to objects.
  *
  * Whenever a CREATE statement, or any other command that creates new objects,
- * is dispatched, the master also needs to tell the QE servers which OIDs to
+ * is dispatched, the coordinator also needs to tell the QE servers which OIDs to
  * use for the new objects.  Before GPDB 5.0, that was done by modifying all
  * the structs representing DDL statements, like DefineStmt,
  * CreateOpClassStmt, and so forth, by adding a new OID field to them.
@@ -44,13 +44,13 @@
  * In a QE node, when we reach the same code as in the QD to create a new
  * object, the GetNewOrPreassignedOid() function is called again.  The
  * function looks into the 'preassigned_oids' list to see if we had received
- * an OID for to use for the named object from the master. Under normal
+ * an OID for to use for the named object from the coordinator. Under normal
  * circumstances, we should have pre-assigned OIDs for all objects created in
  * QEs, and the GetNewOrPreassignedOid() function will throw an error if we
  * don't.
  *
  * All in all, this provides a generic mechanism for DDL commands, to record
- * OIDs that are assigned for new objects in the master, transfer them to QE
+ * OIDs that are assigned for new objects in the coordinator, transfer them to QE
  * nodes when the DDL command is dispatched, and for the QE nodes to use the
  * same, pre-assigned, OIDs for the objects.
  *
@@ -193,10 +193,91 @@ ClearOidAssignmentsOnCommit(void)
 	preserve_oids_on_commit = false;
 }
 
-extern void
+/*
+ * Comments for SaveOidAssignments and RestoreOidAssignments
+ * The two functions should come together, before some procedures
+ * that do not want to touch the global vars (dispatch_oids or preassigned_oids),
+ * we need to first save the oid assignments, and then do the job, finally
+ * restore oid assignments. A typical usage should be as below:
+ *    List *l = SaveOidAssignments();
+ *    do_the_job();
+ *    RestoreOidAssignments(l);
+ *
+ * The global var dispatch_oids is only used on QD, and the global
+ * var preassigned_oids is only used on QEs. They are both Lists,
+ * in a specific memorycontext, normally the memorycontext will be
+ * reset at the end of transaction.
+ *
+ * Greenplum's MPP architecture need to make some OIDs consistent
+ * among coordinator and segments (like table OIDs). The oid assignments
+ * are generated on QD and then dispatched to QEs. A single SQL might
+ * involve sever dispatch events, for example, there are some functions
+ * involving SQLs and these functions are evaluated during planning stage
+ * before we dispatch the final Utility plan. We do not want to the dispatches
+ * during plannign stage to touch oid assignments.
+ *
+ * Another subtle case that the pair of functions are useful is that
+ * subtransaction abort will lead to reset  of the oid assignments memory context.
+ * Subtransaction abort might happen for UDF with exception handling and nothing
+ * to do with the main statement needed to dispatch. That is why we deep copy
+ * the content to CurrentMemoryContext and reset oid assignment context during
+ * SaveOidAssignments and bring everything back during RestoreOidAssignments.
+ *
+ * Note: these two functions only do memory related operations when the gloabl
+ * vars are not empty.
+ */
+List *
+SaveOidAssignments(void)
+{
+	List     *l   = NIL;
+	List     *src = NIL;
+
+	if (Gp_role == GP_ROLE_DISPATCH)
+	{
+		src = dispatch_oids;
+		dispatch_oids = NIL;
+	}
+	else if (Gp_role == GP_ROLE_EXECUTE)
+	{
+		src = preassigned_oids;
+		preassigned_oids = NIL;
+	}
+	else
+		return NIL;
+
+	if (src == NIL)
+		return NIL;
+
+	Assert(CurrentMemoryContext != get_oids_context());
+
+	l = copyObject(src);
+	MemoryContextReset(get_oids_context());
+	return l;
+}
+
+void
 RestoreOidAssignments(List *oid_assignments)
 {
-	dispatch_oids = oid_assignments;
+	MemoryContext   old;
+	List          **target;
+
+	if (oid_assignments == NIL)
+		return;
+
+	if (Gp_role == GP_ROLE_DISPATCH)
+		target = &dispatch_oids;
+	else if (Gp_role == GP_ROLE_EXECUTE)
+		target = &preassigned_oids;
+	else
+		return;
+
+	Assert(CurrentMemoryContext != get_oids_context());
+
+	old = MemoryContextSwitchTo(get_oids_context());
+	*target = copyObject(oid_assignments);
+	MemoryContextSwitchTo(old);
+
+	list_free_deep(oid_assignments);
 }
 
 /* ----------------------------------------------------------------
@@ -218,7 +299,7 @@ AddPreassignedOids(List *l)
 		elog(ERROR, "AddPreassignedOids called during binary upgrade");
 
 	/*
-	 * In the master, the OID-assignment-list is usually included in the next
+	 * In the coordinator, the OID-assignment-list is usually included in the next
 	 * command that is dispatched, after an OID was assigned. In almost all
 	 * cases, the dispatched command is the same CREATE command for which the
 	 * oid was assigned. But I'm not sure if that's true for *all* commands,
@@ -1367,7 +1448,7 @@ AddPreassignedOidFromBinaryUpgrade(Oid oid, Oid catalog, char *objname,
 }
 
 /* ----------------------------------------------------------------
- * Functions for use in the master node.
+ * Functions for use in the coordinator node.
  * ----------------------------------------------------------------
  */
 

@@ -156,6 +156,41 @@ Feature: gpstate tests
             |Bytes received but remain to flush    = [1-9]\d* |
             |Bytes received but remain to replay   = [1-9]\d* |
 
+    Scenario: gpstate -e shows information about segments with ongoing recovery
+        Given a standard local demo cluster is running
+        Given all files in gpAdminLogs directory are deleted
+        And a sample recovery_progress.file is created with ongoing recoveries in gpAdminLogs
+        And we run a sample background script to generate a pid on "coordinator" segment
+        And a sample gprecoverseg.lock directory is created using the background pid in coordinator_data_directory
+        When the user runs "gpstate -e"
+        Then gpstate should print "Segments in recovery" to stdout
+        And gpstate output contains "full,incremental" entries for mirrors of content 0,1
+        And gpstate output looks like
+            | Segment | Port   | Recovery type  | Completed bytes \(kB\) | Total bytes \(kB\) | Percentage completed |
+            | \S+     | [0-9]+ | full           | 1164848                | 1371715            | 84%                  |
+            | \S+     | [0-9]+ | incremental    | 1                      | 1371875            | 1%                   |
+        And all files in gpAdminLogs directory are deleted
+        And the background pid is killed on "coordinator" segment
+        And the gprecoverseg lock directory is removed
+
+    Scenario: gpstate -e does not show information about segments with completed recovery
+        Given a standard local demo cluster is running
+        Given all files in gpAdminLogs directory are deleted
+        And a sample recovery_progress.file is created with completed recoveries in gpAdminLogs
+        And we run a sample background script to generate a pid on "coordinator" segment
+        And a sample gprecoverseg.lock directory is created using the background pid in coordinator_data_directory
+        When the user runs "gpstate -e"
+        Then gpstate should print "Segments in recovery" to stdout
+        And gpstate output contains "full" entries for mirrors of content 1
+        And gpstate output looks like
+            | Segment | Port   | Recovery type  | Completed bytes \(kB\) | Total bytes \(kB\) | Percentage completed |
+            | \S+     | [0-9]+ | full           | 1164848                | 1371715            | 84%                  |
+        And gpstate should not print "incremental" to stdout
+        And gpstate should not print "All segments are running normally" to stdout
+        And all files in gpAdminLogs directory are deleted
+        And the background pid is killed on "coordinator" segment
+        Then the gprecoverseg lock directory is removed
+
     Scenario: gpstate -c logs cluster info for a mirrored cluster
         Given a standard local demo cluster is running
         When the user runs "gpstate -c"
@@ -436,7 +471,7 @@ Feature: gpstate tests
                   distribution_policy_names text,
                   distribution_policy_coloids text,
                   distribution_policy_type text,
-                  root_partition_name text,
+                  root_partition_oid oid,
                   storage_options text,
                   rank int,
                   status text,
@@ -552,6 +587,14 @@ Feature: gpstate tests
         And the user runs command "export PGDATABASE=postgres && $GPHOME/bin/gpstate -e -v"
         Then command should print "pg_isready -q -h .* -p .* -d postgres" to stdout
         And command should print "All segments are running normally" to stdout
+
+    Scenario: gpstate -e -v logs no fatal message in pg_log files on primary segments
+        Given a standard local demo cluster is running
+        And the user records the current timestamp in log_timestamp table
+        And the user runs command "gpstate -e -v"
+        Then command should print "PGOPTIONS=\"-c gp_role=utility\" pg_isready -q -h .* -p .* -d postgres" to stdout
+        And the pg_log files on primary segments should not contain "connections to primary segments are not allowed"
+        And the user drops log_timestamp table
 
 
 ########################### @concourse_cluster tests ###########################

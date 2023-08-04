@@ -59,6 +59,7 @@
 #include "executor/execdebug.h"
 #include "executor/execUtils.h"
 #include "executor/executor.h"
+#include "executor/execPartition.h"
 #include "jit/jit.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -97,7 +98,6 @@
 
 static bool tlist_matches_tupdesc(PlanState *ps, List *tlist, Index varno, TupleDesc tupdesc);
 static void ShutdownExprContext(ExprContext *econtext, bool isCommit);
-static List *flatten_logic_exprs(Node *node);
 
 
 /* ----------------------------------------------------------------
@@ -210,6 +210,8 @@ CreateExecutorState(void)
 
 	estate->currentSliceId = 0;
 	estate->eliminateAliens = false;
+
+	estate->gp_bypass_unique_check = false;
 
 	/*
 	 * Return the executor state structure
@@ -882,14 +884,9 @@ ExecGetRangeTableRelation(EState *estate, Index rti)
 			 * seems sufficient to check this only when rellockmode is higher
 			 * than the minimum.
 			 */
-			/* GPDB_12_MERGE_FIXME: if GDD is not enabled, we acquire a stronger
-			 * lock earlier. What would be a good way to formulate this check?
-			 * For now, just pass orstronger=true.
-			 */
 			rel = table_open(rte->relid, NoLock);
 			Assert(rte->rellockmode == AccessShareLock ||
-				   CheckRelationLockedByMe(rel, rte->rellockmode,
-										   true /* orstronger */));
+				   CheckRelationLockedByMe(rel, rte->rellockmode, false));
 		}
 		else
 		{
@@ -1060,49 +1057,6 @@ ShutdownExprContext(ExprContext *econtext, bool isCommit)
 }
 
 /*
- * flatten_logic_exprs
- * This function is only used by ExecPrefetchJoinQual.
- * ExecPrefetchJoinQual need to prefetch subplan in join
- * qual that contains motion to materialize it to avoid
- * motion deadlock. This function is going to flatten
- * the bool exprs to avoid shortcut of bool logic.
- * An example is:
- * (a and b or c) or (d or e and f or g) and (h and i or j)
- * will be transformed to
- * (a, b, c, d, e, f, g, h, i, j).
- */
-static List *
-flatten_logic_exprs(Node *node)
-{
-	if (node == NULL)
-		return NIL;
-
-	if (IsA(node, BoolExpr))
-	{
-		BoolExpr *be = (BoolExpr *) node;
-		return flatten_logic_exprs((Node *) (be->args));
-	}
-
-	if (IsA(node, List))
-	{
-		List     *es = (List *) node;
-		List     *result = NIL;
-		ListCell *lc = NULL;
-
-		foreach(lc, es)
-		{
-			Node *n = (Node *) lfirst(lc);
-			result = list_concat(result,
-								 flatten_logic_exprs(n));
-		}
-
-		return result;
-	}
-
-	return list_make1(node);
-}
-
-/*
  * fake_outer_params
  *   helper function to fake the nestloop's nestParams
  *   so that prefetch inner or prefetch joinqual will
@@ -1146,91 +1100,6 @@ fake_outer_params(JoinState *node)
 		inner->chgParam = bms_add_member(inner->chgParam,
 										 paramno);
 	}
-}
-
-/*
- * Prefetch JoinQual or NonJoinQual to prevent motion hazard.
- *
- * A motion hazard is a deadlock between motions, a classic motion hazard in a
- * join executor is formed by its inner and outer motions, it can be prevented
- * by prefetching the inner plan, refer to motion_sanity_check() for details.
- *
- * A similar motion hazard can be formed by the outer motion and the join qual
- * motion(or non join qual motion).  A join executor fetches a outer tuple,
- * filters it with the qual, then repeat the process on all the outer tuples.
- * When there are motions in both outer plan and the join qual then below state
- * is possible:
- *
- * 0. processes A and B belong to the join slice, process C belongs to the
- *    outer slice, process D belongs to the JoinQual(NonJoinQual) slice;
- * 1. A has read the first outer tuple and is fetching tuples from D;
- * 2. D is waiting for ACK from B;
- * 3. B is fetching the first outer tuple from C;
- * 4. C is waiting for ACK from A;
- *
- * So a deadlock is formed A->D->B->C->A.  We can prevent it also by
- * prefetching the join qual or non join qual
- *
- * An example is demonstrated and explained in test case
- * src/test/regress/sql/deadlock2.sql.
- *
- * Return true if the JoinQual or NonJoinQual is prefetched.
- */
-void
-ExecPrefetchQual(JoinState *node, bool isJoinQual)
-{
-	EState	   *estate = node->ps.state;
-	ExprContext *econtext = node->ps.ps_ExprContext;
-	PlanState  *inner = innerPlanState(node);
-	PlanState  *outer = outerPlanState(node);
-	TupleTableSlot *innertuple = econtext->ecxt_innertuple;
-
-	ListCell   *lc = NULL;
-	List       *quals = NIL;
-
-	ExprState  *qual;
-
-	if (isJoinQual)
-		qual = node->joinqual;
-	else
-		qual = node->ps.qual;
-
-	Assert(qual);
-
-	/* Outer tuples should not be fetched before us */
-	Assert(econtext->ecxt_outertuple == NULL);
-
-	/* Build fake inner & outer tuples */
-	econtext->ecxt_innertuple = ExecInitNullTupleSlot(estate,
-													  ExecGetResultType(inner),
-													  &TTSOpsVirtual);
-	econtext->ecxt_outertuple = ExecInitNullTupleSlot(estate,
-													  ExecGetResultType(outer),
-													  &TTSOpsVirtual);
-
-	if (IsA(node->ps.plan, NestLoop))
-	{
-		NestLoop *nl = (NestLoop *) (node->ps.plan);
-		if (nl->nestParams)
-			fake_outer_params(node);
-	}
-
-	quals = flatten_logic_exprs((Node *) qual);
-
-	/* Fetch subplan with the fake inner & outer tuples */
-	foreach(lc, quals)
-	{
-		/*
-		 * Force every qual is prefech because
-		 * our target is to materialize motion node.
-		 */
-		ExprState  *clause = (ExprState *) lfirst(lc);
-		(void) ExecQual(clause, econtext);
-	}
-
-	/* Restore previous state */
-	econtext->ecxt_innertuple = innertuple;
-	econtext->ecxt_outertuple = NULL;
 }
 
 /* ----------------------------------------------------------------
@@ -1647,6 +1516,18 @@ void mppExecutorFinishup(QueryDesc *queryDesc)
 	}
 
 	/*
+	 * If we are finishing a query before all the tuples of the query
+	 * plan were fetched we must call ExecSquelchNode before checking
+	 * the dispatch results in order to tell we no longer
+	 * need any more tuples.
+	 */
+	if (Gp_role == GP_ROLE_DISPATCH && !estate->es_got_eos &&
+		!(estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY))
+	{
+		ExecSquelchNode(queryDesc->planstate);
+	}
+
+	/*
 	 * If QD, wait for QEs to finish and check their results.
 	 */
 	if (estate->dispatcherState && estate->dispatcherState->primaryResults)
@@ -1655,17 +1536,6 @@ void mppExecutorFinishup(QueryDesc *queryDesc)
 		CdbDispatcherState *ds = estate->dispatcherState;
 		DispatchWaitMode waitMode = DISPATCH_WAIT_NONE;
 		ErrorData *qeError = NULL;
-
-		/*
-		 * If we are finishing a query before all the tuples of the query
-		 * plan were fetched we must call ExecSquelchNode before checking
-		 * the dispatch results in order to tell the nodes below we no longer
-		 * need any more tuples.
-		 */
-		if (!estate->es_got_eos)
-		{
-			ExecSquelchNode(queryDesc->planstate);
-		}
 
 		/*
 		 * Wait for completion of all QEs.  We send a "graceful" query
@@ -1683,7 +1553,7 @@ void mppExecutorFinishup(QueryDesc *queryDesc)
 		{
 			estate->dispatcherState = NULL;
 			FlushErrorState();
-			ReThrowError(qeError);
+			ThrowErrorData(qeError);
 		}
 
 		/* collect pgstat from QEs for current transaction level */
@@ -2319,4 +2189,167 @@ ExecGetReturningSlot(EState *estate, ResultRelInfo *relInfo)
 	}
 
 	return relInfo->ri_ReturningSlot;
+}
+
+/* Return a bitmap representing columns being inserted */
+Bitmapset *
+ExecGetInsertedCols(ResultRelInfo *relinfo, EState *estate)
+{
+	/*
+	 * The columns are stored in the range table entry.  If this ResultRelInfo
+	 * represents a partition routing target, and doesn't have an entry of its
+	 * own in the range table, fetch the parent's RTE and map the columns to
+	 * the order they are in the partition.
+	 */
+	if (relinfo->ri_RangeTableIndex != 0)
+	{
+		RangeTblEntry *rte = exec_rt_fetch(relinfo->ri_RangeTableIndex, estate);
+
+		return rte->insertedCols;
+	}
+	else if (relinfo->ri_RootResultRelInfo)
+	{
+		ResultRelInfo *rootRelInfo = relinfo->ri_RootResultRelInfo;
+		RangeTblEntry *rte = exec_rt_fetch(rootRelInfo->ri_RangeTableIndex, estate);
+		PartitionRoutingInfo *partrouteinfo = relinfo->ri_PartitionInfo;
+
+		if (partrouteinfo->pi_RootToPartitionMap != NULL)
+			return execute_attr_map_cols(rte->insertedCols,
+										 partrouteinfo->pi_RootToPartitionMap);
+		else
+			return rte->insertedCols;
+	}
+	else
+	{
+		/*
+		 * The relation isn't in the range table and it isn't a partition
+		 * routing target.  This ResultRelInfo must've been created only for
+		 * firing triggers and the relation is not being inserted into.  (See
+		 * ExecGetTriggerResultRel.)
+		 */
+		return NULL;
+	}
+}
+
+/* Return a bitmap representing columns being updated */
+Bitmapset *
+ExecGetUpdatedCols(ResultRelInfo *relinfo, EState *estate)
+{
+	/* see ExecGetInsertedCols() */
+	if (relinfo->ri_RangeTableIndex != 0)
+	{
+		RangeTblEntry *rte = exec_rt_fetch(relinfo->ri_RangeTableIndex, estate);
+
+		return rte->updatedCols;
+	}
+	else if (relinfo->ri_RootResultRelInfo)
+	{
+		ResultRelInfo *rootRelInfo = relinfo->ri_RootResultRelInfo;
+		RangeTblEntry *rte = exec_rt_fetch(rootRelInfo->ri_RangeTableIndex, estate);
+		PartitionRoutingInfo *partrouteinfo = relinfo->ri_PartitionInfo;
+
+		if (partrouteinfo->pi_RootToPartitionMap != NULL)
+			return execute_attr_map_cols(rte->updatedCols,
+										 partrouteinfo->pi_RootToPartitionMap);
+		else
+			return rte->updatedCols;
+	}
+	else
+		return NULL;
+}
+
+/* Return a bitmap representing generated columns being updated */
+Bitmapset *
+ExecGetExtraUpdatedCols(ResultRelInfo *relinfo, EState *estate)
+{
+	/* see ExecGetInsertedCols() */
+	if (relinfo->ri_RangeTableIndex != 0)
+	{
+		RangeTblEntry *rte = exec_rt_fetch(relinfo->ri_RangeTableIndex, estate);
+
+		return rte->extraUpdatedCols;
+	}
+	else if (relinfo->ri_RootResultRelInfo)
+	{
+		ResultRelInfo *rootRelInfo = relinfo->ri_RootResultRelInfo;
+		RangeTblEntry *rte = exec_rt_fetch(rootRelInfo->ri_RangeTableIndex, estate);
+		PartitionRoutingInfo *partrouteinfo = relinfo->ri_PartitionInfo;
+
+		if (partrouteinfo->pi_RootToPartitionMap != NULL)
+			return execute_attr_map_cols(rte->extraUpdatedCols,
+										 partrouteinfo->pi_RootToPartitionMap);
+		else
+			return rte->extraUpdatedCols;
+	}
+	else
+		return NULL;
+}
+
+/* Return columns being updated, including generated columns */
+Bitmapset *
+ExecGetAllUpdatedCols(ResultRelInfo *relinfo, EState *estate)
+{
+	return bms_union(ExecGetUpdatedCols(relinfo, estate),
+					 ExecGetExtraUpdatedCols(relinfo, estate));
+}
+
+/*
+ * During attribute re-mapping for heterogeneous partitions, we use
+ * this struct to identify which varno's attributes will be re-mapped.
+ * Using this struct as a *context* during expression tree walking, we
+ * can skip varattnos that do not belong to a given varno.
+ */
+typedef struct AttrMapContext
+{
+	const AttrNumber *newattno; /* The mapping table to remap the varattno */
+	Index		varno;			/* Which rte's varattno to re-map */
+} AttrMapContext;
+
+/*
+ * Remaps the varattno of a varattno in a Var node using an attribute map.
+ */
+static bool
+change_varattnos_varno_walker(Node *node, const AttrMapContext *attrMapCxt)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (var->varlevelsup == 0 && (var->varno == attrMapCxt->varno) &&
+			var->varattno > 0)
+		{
+			/*
+			 * ??? the following may be a problem when the node is multiply
+			 * referenced though stringToNode() doesn't create such a node
+			 * currently.
+			 */
+			Assert(attrMapCxt->newattno[var->varattno - 1] > 0);
+			var->varattno = var->varoattno = attrMapCxt->newattno[var->varattno - 1];
+		}
+		return false;
+	}
+	return expression_tree_walker(node, change_varattnos_varno_walker,
+								  (void *) attrMapCxt);
+}
+
+/*
+ * Replace varattno values for a given varno RTE index in an expression
+ * tree according to the given map array, that is, varattno N is replaced
+ * by newattno[N-1].  It is caller's responsibility to ensure that the array
+ * is long enough to define values for all user varattnos present in the tree.
+ * System column attnos remain unchanged.
+ *
+ * Note that the passed node tree is modified in-place!
+ */
+void
+change_varattnos_of_a_varno(Node *node, const AttrNumber *newattno, Index varno)
+{
+	AttrMapContext attrMapCxt;
+
+	attrMapCxt.newattno = newattno;
+	attrMapCxt.varno = varno;
+
+	(void) change_varattnos_varno_walker(node, &attrMapCxt);
 }

@@ -11,15 +11,13 @@ import shutil
 import subprocess
 import difflib
 
-import pg
-
 from contextlib import closing
 from datetime import datetime
 from gppylib.commands.base import Command, ExecutionError, REMOTE
 from gppylib.commands.gp import chk_local_db_running, get_coordinatordatadir
 from gppylib.db import dbconn
 from gppylib.gparray import GpArray, MODE_SYNCHRONIZED
-
+from gppylib.utils import escape_string
 
 PARTITION_START_DATE = '2010-01-01'
 PARTITION_END_DATE = '2013-01-01'
@@ -131,8 +129,7 @@ def run_gpcommand(context, command, cmd_prefix=''):
 def run_gpcommand_async(context, command):
     cmd = Command(name='run %s' % command, cmdStr='$GPHOME/bin/%s' % (command))
     asyncproc = cmd.runNoWait()
-    if 'asyncproc' not in context:
-        context.asyncproc = asyncproc
+    context.asyncproc = asyncproc
 
 
 def check_stdout_msg(context, msg, escapeStr = False):
@@ -154,7 +151,6 @@ def check_string_not_present_stdout(context, msg):
     if pat.search(context.stdout_message):
         err_str = "Did not expect stdout string '%s' but found: '%s'" % (msg, context.stdout_message)
         raise Exception(err_str)
-
 
 def check_err_msg(context, err_msg):
     if not hasattr(context, 'exception'):
@@ -260,17 +256,12 @@ def getRow(dbname, exec_sql):
 
 
 def check_db_exists(dbname, host=None, port=0, user=None):
-    LIST_DATABASE_SQL = 'SELECT datname FROM pg_database'
-
-    results = []
     with closing(dbconn.connect(dbconn.DbURL(hostname=host, username=user, port=port, dbname='template1'), unsetSearchPath=False)) as conn:
-        curs = dbconn.query(conn, LIST_DATABASE_SQL)
-        results = curs.fetchall()
-    for result in results:
-        if result[0] == dbname:
-            return True
+        count = dbconn.querySingleton(conn, "SELECT count(*) FROM pg_database WHERE datname=\'{}\';".format(dbname))
+        if count == 0:
+            return False
 
-    return False
+    return True
 
 
 def create_database_if_not_exists(context, dbname, host=None, port=0, user=None):
@@ -319,14 +310,14 @@ def check_table_exists(context, dbname, table_name, table_type=None, host=None, 
                 FROM pg_class c, pg_namespace n
                 WHERE c.relname = '%s' AND n.nspname = '%s' AND c.relnamespace = n.oid;
                 """
-            SQL = SQL_format % (escape_string(tablename, conn=conn), escape_string(schemaname, conn=conn))
+            SQL = SQL_format % (escape_string(tablename), escape_string(schemaname))
         else:
             SQL_format = """
                 SELECT oid, relkind, relam, reloptions \
                 FROM pg_class \
                 WHERE relname = E'%s';\
                 """
-            SQL = SQL_format % (escape_string(table_name, conn=conn))
+            SQL = SQL_format % (escape_string(table_name))
 
         table_row = None
         try:
@@ -575,6 +566,14 @@ def are_segments_synchronized():
     return True
 
 
+def are_segments_synchronized_for_content_ids(content_ids):
+    gparray = GpArray.initFromCatalog(dbconn.DbURL())
+    segments = gparray.getDbList()
+    for seg in segments:
+        if seg.content in content_ids and seg.mode != MODE_SYNCHRONIZED:
+            return False
+    return True
+
 def check_row_count(context, tablename, dbname, nrows):
     NUM_ROWS_QUERY = 'select count(*) from %s' % tablename
     # We want to bubble up the exception so that if table does not exist, the test fails
@@ -655,6 +654,14 @@ def are_segments_running():
             result = False
     return result
 
+def is_segment_running(role, contentid):
+    gparray = GpArray.initFromCatalog(dbconn.DbURL())
+    segments = gparray.getDbList()
+    for seg in segments:
+        if seg.getSegmentRole() == role and seg.content == contentid and seg.status != 'u':
+            print("segment is not up - %s" % seg)
+            return False
+    return True
 
 def modify_sql_file(file, hostport):
     if os.path.isfile(file):
@@ -758,11 +765,6 @@ def replace_special_char_env(str):
             str = str.replace("$%s" % var, os.environ[var])
     return str
 
-
-def escape_string(string, conn):
-    return pg.DB(db=conn).escape_string(string)
-
-
 def wait_for_unblocked_transactions(context, num_retries=150):
     """
     Tries once a second to successfully commit a transaction to the database
@@ -788,24 +790,39 @@ def wait_for_unblocked_transactions(context, num_retries=150):
         raise Exception('Unable to establish a connection to database !!!')
 
 
-def wait_for_desired_query_result_on_segment(host, port, query, desired_result, num_retries=150):
+def wait_for_desired_query_result(dburl, query, desired_result, utility=False):
     """
     Tries once a second to check for the desired query result on the segment.
     Raises an Exception after failing <num_retries> times.
     """
     attempt = 0
+    num_retries = 600
     actual_result = None
-    url = dbconn.DbURL(hostname=host, port=port, dbname='template1')
     while (attempt < num_retries) and (actual_result != desired_result):
         attempt += 1
         try:
-            with closing(dbconn.connect(url, utility=True)) as conn:
+            with closing(dbconn.connect(dburl, utility=utility)) as conn:
                 cursor = dbconn.query(conn, query)
                 rows = cursor.fetchall()
                 actual_result = rows[0][0]
         except Exception as e:
-            print('could not query segment (%s:%s) %s' % (host, port, e))
+            print('could not query (%s:%s) %s' % (dburl.pghost, dburl.pgport, e))
         time.sleep(1)
 
     if attempt == num_retries:
         raise Exception('Timed out after %s retries' % num_retries)
+
+
+
+def wait_for_database_dropped(dbname, remaining_attempt = 3000):
+    """
+    Tries once a decisecond to check for the database exist.
+    Raises an Exception after failing <remaining_attempt> times.
+    """
+    while remaining_attempt:
+        if not check_db_exists(dbname):
+            break
+        remaining_attempt -= 1
+        if remaining_attempt == 0:
+            raise Exception('Unable to drop the database {} !!!').format(dbname)
+        time.sleep(0.1)

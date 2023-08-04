@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Copyright (c) 2004-Present VMware, Inc. or its affiliates.
 
@@ -15,7 +16,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import pg
 import pty
 import os
 import subprocess
@@ -28,6 +28,18 @@ import socket
 from optparse import OptionParser
 import traceback
 import select
+import psycopg2
+import io
+
+## FIXME: When converting 'INTERVAL' typed value to Python Object, psycopg2 doesn't
+## recognize the literal string '@ 0'. It's probably caused by the 'DateStyle' GUC
+## setting. It would be good to fix it in future.
+def cast_interval(value, cur):
+    if value is None:
+        return None
+    return str(value)
+INTERVAL = psycopg2.extensions.new_type((1186,), "INTERVAL", cast_interval)
+psycopg2.extensions.register_type(INTERVAL)
 
 def is_digit(n):
     try:
@@ -36,27 +48,22 @@ def is_digit(n):
     except ValueError:
         return  False
 
-def null_notice_receiver(notice):
-    '''
-        Tests ignore notice messages when analyzing results,
-        so silently drop notices from the pg.connection
-    '''
-    return
-
-
 class ConnectionInfo(object):
     __instance = None
 
     def __init__(self):
         self.max_content_id = 0
+        self._conn_map = []
         if ConnectionInfo.__instance is not None:
             raise Exception("ConnectionInfo is a singleton.")
 
-        query = ("SELECT content, hostname, port, role FROM gp_segment_configuration")
-
-        con = pg.connect(dbname="postgres")
-        self._conn_map = con.query(query).getresult()
-        con.close()
+        with psycopg2.connect(dbname="postgres") as conn:
+            # Don't start transaction automatically.
+            conn.set_session(autocommit=True)
+            with conn.cursor() as cur:
+                cur.execute("SELECT content, hostname, port, role FROM gp_segment_configuration")
+                for row in cur:
+                    self._conn_map.append(row)
 
         ConnectionInfo.__instance = self
         for content, _, _, _ in ConnectionInfo.__instance._conn_map:
@@ -78,11 +85,11 @@ class ConnectionInfo(object):
         for content, host, port, role in conn_map:
             if real_content_id == content and role == role_name:
                 return (host, port)
-        raise Exception("Cannont find a connection with content_id=%d, role=%c" % (content_id, role_name))
+        raise Exception("Cannot find a connection with content_id=%d, role=%c" % (content_id, role_name))
 
 
 class GlobalShellExecutor(object):
-    BASH_PS1 = 'test_sh$>'
+    BASH_PS1 = 'GlobalShellExecutor>'
 
     class ExecutionError(Exception):
         ""
@@ -93,11 +100,12 @@ class GlobalShellExecutor(object):
         self.initfile_prefix = initfile_prefix
         self.v_cnt = 0
         # open pseudo-terminal to interact with subprocess
-        self.master_fd, self.slave_fd = pty.openpty()
+        self.primary_fd, self.subsidiary_fd = pty.openpty()
         self.sh_proc = subprocess.Popen(['/bin/bash', '--noprofile', '--norc', '--noediting', '-i'],
-                                        stdin=self.slave_fd,
-                                        stdout=self.slave_fd,
-                                        stderr=self.slave_fd,
+                                        stdin=self.subsidiary_fd,
+                                        stdout=self.subsidiary_fd,
+                                        stderr=self.subsidiary_fd,
+                                        start_new_session=True,
                                         universal_newlines=True)
         self.bash_log_file = open("%s.log" % self.initfile_prefix, "w+")
         self.__run_command("export PS1='%s'" % GlobalShellExecutor.BASH_PS1)
@@ -110,7 +118,7 @@ class GlobalShellExecutor(object):
         # If write the matchsubs section directly to the output, the generated token id will be compared by gpdiff.pl
         # so here just write all matchsubs section into an auto generated init file when this test case file finished.
         if not with_error and self.initfile_prefix != None and len(self.initfile_prefix) > 1:
-            output_init_file = "%s.ini" % self.initfile_prefix
+            output_init_file = "%s.initfile" % self.initfile_prefix
             cmd = ''' [ ! -z "${MATCHSUBS}" ] && echo "-- start_matchsubs ${NL} ${MATCHSUBS} ${NL}-- end_matchsubs" > %s ''' % output_init_file
             self.exec_global_shell(cmd, False)
 
@@ -119,51 +127,50 @@ class GlobalShellExecutor(object):
         try:
             self.sh_proc.terminate()
         except OSError as e:
-            # Ignore the exception if the process doesn't exist.
+            # Log then ignore the exception if the process doesn't exist.
+            print("Failed to terminate bash process: %s" % e)
             pass
         self.sh_proc = None
 
     def __run_command(self, sh_cmd):
-        # Strip the newlines at the end. It will be added later.
+        # Strip extra new lines
         sh_cmd = sh_cmd.rstrip()
-        bytes_written = os.write(self.master_fd, sh_cmd.encode())
-        bytes_written += os.write(self.master_fd, b'\n')
+        os.write(self.primary_fd, sh_cmd.encode()+b'\n')
 
         output = ""
         while self.sh_proc.poll() is None:
-            # If not returns in 10 seconds, consider it as an fatal error.
-            r, w, e = select.select([self.master_fd], [], [self.master_fd], 10)
+            # If times out, consider it as an fatal error.
+            r, _, e = select.select([self.primary_fd], [], [self.primary_fd], 30)
             if e:
                 # Terminate the shell when we get any output from stderr
-                o = os.read(self.master_fd, 10240)
+                o = os.read(self.primary_fd, 10240)
                 self.bash_log_file.write(o)
                 self.bash_log_file.flush()
                 self.terminate(True)
-                raise GlobalShellExecutor.ExecutionError("Error happened to the bash daemon, see %s for details." % self.bash_log_file.name)
+                raise GlobalShellExecutor.ExecutionError("Error happened to the bash process, see %s for details." % self.bash_log_file.name)
 
             if r:
-                o = os.read(self.master_fd, 10240).decode()
+                o = os.read(self.primary_fd, 10240).decode()
                 self.bash_log_file.write(o)
                 self.bash_log_file.flush()
                 output += o
-                if o.endswith(GlobalShellExecutor.BASH_PS1):
+                if output.endswith(GlobalShellExecutor.BASH_PS1):
                     lines = output.splitlines()
                     return lines[len(sh_cmd.splitlines()):len(lines) - 1]
 
-
             if not r and not e:
                 self.terminate(True)
-                raise GlobalShellExecutor.ExecutionError("Timeout happened to the bash daemon, see %s for details." % self.bash_log_file.name)
+                raise GlobalShellExecutor.ExecutionError("Timeout happened to the bash process, see %s for details." % self.bash_log_file.name)
 
         self.terminate(True)
-        raise GlobalShellExecutor.ExecutionError("Bash daemon has been stopped, see %s for details." % self.bash_log_file.name)
+        raise GlobalShellExecutor.ExecutionError("Bash process has been stopped, see %s for details." % self.bash_log_file.name)
 
-    # execute global shell cmd in bash deamon, and fetch result without blocking
+    # execute global shell cmd in bash process, and fetch result without blocking
     def exec_global_shell(self, sh_cmd, is_trip_output_end_blanklines):
         if self.sh_proc == None:
-            raise GlobalShellExecutor.ExecutionError("The bash daemon has been terminated abnormally, see %s for details." % self.bash_log_file.name)
+            raise GlobalShellExecutor.ExecutionError("The bash process has been terminated abnormally, see %s for details." % self.bash_log_file.name)
 
-        # get the output of shell commmand
+        # get the output of shell command
         output = self.__run_command(sh_cmd)
         if is_trip_output_end_blanklines:
             for i in range(len(output)-1, 0, -1):
@@ -174,7 +181,7 @@ class GlobalShellExecutor(object):
 
         return output
 
-    # execute gobal shell:
+    # execute global shell:
     # 1) set input stream -> $RAW_STR
     # 2) execute shell command from input
     # if error, write error message to err_log_file
@@ -187,7 +194,7 @@ class GlobalShellExecutor(object):
             self.v_cnt, escape_in, self.v_cnt, sh_cmd)
         return self.exec_global_shell(cmd, is_trip_output_end_blanklines)
 
-    # extrac shell shell, sql part from one line with format: @header '': SQL
+    # extract shell, sql part from one line with format: @header '': SQL
     # return row: (found the header or not?, the extracted shell, the SQL in the left part)
     def extract_sh_cmd(self, header, input_str):
         start = len(header)
@@ -204,7 +211,7 @@ class GlobalShellExecutor(object):
         for i in range(start, len(input_str)):
             if end == 0 and input_str[i] == '\'':
                 if not is_start:
-                    # find shell begin postion
+                    # find shell begin position
                     is_start = True
                     start = i+1
                     continue
@@ -216,7 +223,7 @@ class GlobalShellExecutor(object):
                         break
                 if cnt % 2 == 1:
                     continue
-                # find shell end postion
+                # find shell end position
                 res_cmd = input_str[start: i]
                 end = i
                 continue
@@ -229,7 +236,7 @@ class GlobalShellExecutor(object):
                     res_sql = input_str[i+1:]
                     break
         if not is_start or end == 0 or not is_trip_comma:
-            raise Exception("Invalid format: %v", input_str)
+            raise Exception("Invalid format: %s", input_str)
         #unescape \' to ' and \\ to '
         res_cmd = res_cmd.replace('\\\'', '\'')
         res_cmd = res_cmd.replace('\\\\', '\\')
@@ -264,7 +271,7 @@ class SQLIsolationExecutor(object):
             self.passwd = passwd
 
             parent_conn, child_conn = multiprocessing.Pipe(True)
-            self.p = multiprocessing.Process(target=self.session_process, args=(child_conn,))   
+            self.p = multiprocessing.Process(target=self.session_process, args=(child_conn,))
             self.pipe = parent_conn
             self.has_open = False
             self.p.start()
@@ -276,11 +283,11 @@ class SQLIsolationExecutor(object):
             self.out_file = out_file
 
         def session_process(self, pipe):
-            sp = SQLIsolationExecutor.SQLSessionProcess(self.name, 
+            sp = SQLIsolationExecutor.SQLSessionProcess(self.name,
                 self.mode, pipe, self.dbname, user=self.user, passwd=self.passwd)
             sp.do()
 
-        def query(self, command, post_run_cmd, global_sh_executor):
+        def query(self, command, post_run_cmd = None, global_sh_executor = None):
             print(file=self.out_file)
             self.out_file.flush()
             if len(command.strip()) == 0:
@@ -332,7 +339,7 @@ class SQLIsolationExecutor(object):
         def quit(self):
             print(" ... <quitting>", file=self.out_file)
             self.stop()
-        
+
         def terminate(self):
             self.pipe.close()
             self.p.terminate()
@@ -396,25 +403,19 @@ class SQLIsolationExecutor(object):
             retry = 1000
             while retry:
                 try:
-                    if (given_port is None):
-                        con = pg.connect(host= given_host,
-                                          opt= given_opt,
-                                          dbname= given_dbname,
-                                          user = given_user,
-                                          passwd = given_passwd)
-                    else:
-                        con = pg.connect(host= given_host,
-                                                  port= given_port,
-                                                  opt= given_opt,
-                                                  dbname= given_dbname,
-                                                  user = given_user,
-                                                  passwd = given_passwd)
+                    con = psycopg2.connect(host=given_host,
+                                           port=given_port,
+                                           options=given_opt,
+                                           dbname=given_dbname,
+                                           user=given_user,
+                                           password=given_passwd)
                     break
                 except Exception as e:
                     if self.mode == "retrieve" and ("auth token is invalid" in str(e) or "Authentication failure" in str(e) or "does not exist" in str(e)):
                         self.create_exception = e
                         break
                     elif (("the database system is starting up" in str(e) or
+                         "the database system is resetting" in str(e) or
                          "the database system is in recovery mode" in str(e)) and
                         retry > 1):
                         retry -= 1
@@ -422,46 +423,44 @@ class SQLIsolationExecutor(object):
                     else:
                         raise
             if con is not None:
-                con.set_notice_receiver(null_notice_receiver)
+                # Don't start transaction automatically.
+                con.set_session(autocommit=True)
             return con
- 
+
         def get_hostname_port(self, contentid, role):
             """
                 Gets the port number/hostname combination of the
                 contentid and role
             """
-            query = ("SELECT hostname, port FROM gp_segment_configuration WHERE"
-                     " content = %s AND role = '%s'") % (contentid, role)
             con = self.connectdb(self.dbname, given_opt="-c gp_role=utility")
-            r = con.query(query).getresult()
-            con.close()
-            if len(r) == 0:
-                raise Exception("Invalid content %s" % contentid)
-            if r[0][0] == socket.gethostname():
-                return (None, int(r[0][1]))
-            return (r[0][0], int(r[0][1]))
+            with con.cursor() as cur:
+                cur.execute("SELECT hostname, port FROM gp_segment_configuration WHERE"
+                            " content = %s AND role = %s", (contentid, role))
+                r = cur.fetchall()
+                con.close()
+                if len(r) == 0 or len(r[0]) != 2:
+                    raise Exception("Invalid content %s" % contentid)
+                if r[0][0] == socket.gethostname():
+                    return (None, int(r[0][1]))
+                return (r[0][0], int(r[0][1]))
 
-        def printout_result(self, r):
+        def printout_result(self, description, rows):
             """
-            Print out a pygresql result set (a Query object, after the query
+            Print out a psycopg2 result set (a Query object, after the query
             has been executed), in a format that imitates the default
             formatting of psql. This isn't a perfect imitation: we left-justify
             all the fields and headers, whereas psql centers the header, and
             right-justifies numeric fields. But this is close enough, to make
-            gpdiff.pl recognize the result sets as such. (We used to just call
-            str(r), and let PyGreSQL do the formatting. But even though
-            PyGreSQL's default formatting is close to psql's, it's not close
-            enough.)
+            gpdiff.pl recognize the result sets as such.
             """
             widths = []
+            result = ""
 
             # Figure out the widths of each column.
-            fields = r.listfields()
-            for f in fields:
-                widths.append(len(str(f)))
+            for f in description:
+                widths.append(len(f.name))
 
-            rset = r.getresult()
-            for row in rset:
+            for row in rows:
                 colno = 0
                 for col in row:
                     if col is None:
@@ -470,26 +469,25 @@ class SQLIsolationExecutor(object):
                     colno = colno + 1
 
             # Start printing. Header first.
-            result = ""
             colno = 0
-            for f in fields:
+            for f in description:
                 if colno > 0:
                     result += "|"
-                result += " " + f.ljust(widths[colno]) + " "
+                result += " " + f.name.ljust(widths[colno]) + " "
                 colno = colno + 1
             result += "\n"
 
             # Then the bar ("----+----")
             colno = 0
-            for f in fields:
+            for f in description:
                 if colno > 0:
                     result += "+"
                 result += "".ljust(widths[colno] + 2, "-")
-                colno = colno + 1
+                colno += 1
             result += "\n"
 
             # Then the result set itself
-            for row in rset:
+            for row in rows:
                 colno = 0
                 for col in row:
                     if colno > 0:
@@ -508,10 +506,10 @@ class SQLIsolationExecutor(object):
                 result += "\n"
 
             # Finally, the row count
-            if len(rset) == 1:
+            if len(rows) == 1:
                 result += "(1 row)\n"
             else:
-                result += "(" + str(len(rset)) + " rows)\n"
+                result += "(" + str(len(rows)) + " rows)\n"
 
             return result
 
@@ -520,20 +518,26 @@ class SQLIsolationExecutor(object):
                 Executes a given command
             """
             try:
-                r = self.con.query(command)
-                if r is not None:
-                    if type(r) == str:
-                        # INSERT, UPDATE, etc that returns row count but not result set
-                        echo_content = command[:-1].partition(" ")[0].upper()
-                        return "%s %s" % (echo_content, r)
+                with self.con.cursor() as cur:
+                    ## FIXME: Currently, psycopg2's cursor doesn't support executing 'COPY TO'
+                    ## commands. We use the copy_expert() API to work around.
+                    ## Issue: https://github.com/psycopg/psycopg2/issues/444
+                    if command.lower().startswith('copy'):
+                        cur.copy_expert(command, io.StringIO())
                     else:
-                        # SELECT or similar, print the result set without the command (type pg.Query)
-                        return self.printout_result(r)
-                else:
-                    # CREATE or other DDL without a result set or count
-                    echo_content = command[:-1].partition(" ")[0].upper()
-                    return echo_content
-            except Exception as e:
+                        cur.execute(command)
+                    if cur.description is not None:
+                        return self.printout_result(cur.description, cur.fetchall())
+                    elif cur.statusmessage:
+                        return str(cur.statusmessage)
+                    return ""
+            except psycopg2.Error as e:
+                ## Normally, the exception is raised by the server and we can fetch the
+                ## error message via e.pgerror. However, there's some situation where the
+                ## exception is not raised by the server, e.g., ProgrammingError, we should
+                ## print out the error message directly to help debugging.
+                if e.pgerror:
+                    return str(e.pgerror)
                 return str(e)
 
         def do(self):
@@ -589,17 +593,19 @@ class SQLIsolationExecutor(object):
 
     def get_all_primary_contentids(self, dbname):
         """
-        Retrieves all primary content IDs (including the master). Intended for
+        Retrieves all primary content IDs (including the coordinator). Intended for
         use by *U queries.
         """
         if not dbname:
             dbname = self.dbname
 
-        con = pg.connect(dbname=dbname)
-        result = con.query("SELECT content FROM gp_segment_configuration WHERE role = 'p' order by content").getresult()
-        if len(result) == 0:
-            raise Exception("Invalid gp_segment_configuration contents")
-        return [int(content[0]) for content in result]
+        with psycopg2.connect(dbname=dbname) as con:
+            with con.cursor() as cur:
+                cur.execute("SELECT content FROM gp_segment_configuration WHERE role = 'p' order by content")
+                result = cur.fetchall()
+                if len(result) == 0:
+                    raise Exception("Invalid gp_segment_configuration contents")
+                return [int(content[0]) for content in result]
 
     def __preprocess_sql(self, name, pre_run_cmd, sql, global_sh_executor):
         if not pre_run_cmd:
@@ -611,7 +617,7 @@ class SQLIsolationExecutor(object):
         global_sh_executor.exec_global_shell("GP_PORT=%s" % port, True)
         sqls = global_sh_executor.exec_global_shell_with_orig_str(sql, pre_run_cmd, True)
         if (len(sqls) != 1):
-            raise Exception("Invalid shell commmand: %v", sqls)
+            raise Exception("Invalid shell command: %s" % "\n".join(sqls))
 
         return sqls[0]
 
@@ -619,14 +625,13 @@ class SQLIsolationExecutor(object):
         (hostname, port) = ConnectionInfo.get_hostname_port(name, 'p')
         global_sh_executor.exec_global_shell("GP_HOSTNAME=%s" % hostname, True)
         global_sh_executor.exec_global_shell("GP_PORT=%s" % port, True)
-        out= global_sh_executor.exec_global_shell("get_retrieve_token", True)
+        out = global_sh_executor.exec_global_shell("get_retrieve_token", True)
         if (len(out) > 0):
             token = out[0]
         out = global_sh_executor.exec_global_shell("echo ${RETRIEVE_USER}", True)
         if (len(out) > 0):
             user = out[0]
         return (user, token)
-
 
     def process_command(self, command, output_file, global_sh_executor):
         """
@@ -659,7 +664,7 @@ class SQLIsolationExecutor(object):
                 con_mode = "mirror"
             sql = m.groups()[2]
             sql = sql.lstrip()
-            # If db_name is specifed , it should be of the following syntax:
+            # If db_name is specified , it should be of the following syntax:
             # 1:@db_name <db_name>: <sql>
             if sql.startswith('@db_name'):
                 sql_parts = sql.split(':', 2)
@@ -757,7 +762,7 @@ class SQLIsolationExecutor(object):
                     (retrieve_user, retrieve_token) = self.__get_retrieve_user_token(name, global_sh_executor)
                     self.get_process(output_file, name, con_mode, dbname=dbname, user=retrieve_user, passwd=retrieve_token).query(sql_new, post_run_cmd, global_sh_executor)
                 except SQLIsolationExecutor.SessionError as e:
-                    print (str(e), file=output_file)
+                    print(str(e), file=output_file)
                     self.processes[(e.name, e.mode)].terminate()
                     del self.processes[(e.name, e.mode)]
         elif flag == "R&":
@@ -772,9 +777,24 @@ class SQLIsolationExecutor(object):
         elif flag == "Rq":
             if len(sql) > 0:
                 raise Exception("No query should be given on quit")
-            self.quit_process(output_file, process_name, con_mode, dbname=dbname)
+
+            if process_name == '*':
+                process_names = [str(content) for content in self.get_all_primary_contentids(dbname)]
+            else:
+                process_names = [process_name]
+
+            for name in process_names:
+                try:
+                    self.quit_process(output_file, name, con_mode, dbname=dbname)
+                except Exception as e:
+                    print(str(e), file=output_file)
+                    pass
         elif flag == "M":
             self.get_process(output_file, process_name, con_mode, dbname=dbname).query(sql.strip(), post_run_cmd, global_sh_executor)
+        elif flag == "Mq":
+            if len(sql) > 0:
+                raise Exception("No query should be given on quit Mq")
+            self.quit_process(output_file, process_name, con_mode, dbname=dbname)
         else:
             raise Exception("Invalid isolation flag")
 
@@ -793,20 +813,20 @@ class SQLIsolationExecutor(object):
                 print((" " if command and not newline else "") + line.strip(), end="", file=output_file)
                 newline = False
                 if line[0] == "!":
-                    command_part = line # shell commands can use -- for multichar options like --include
+                    command_part = line # shell commands can use -- for long options like --include
                 elif re.match(r";.*--", line) or re.match(r"^--", line):
                     command_part = line.partition("--")[0] # remove comment from line
                 else:
                     command_part = line
                 if command_part == "" or command_part == "\n":
-                    print(file=output_file) 
+                    print(file=output_file)
                     newline = True
-                elif re.match(r".*;\s*$", command_part) or re.match(r"^\d+[q\\<]:\s*$", line) or re.match(r"^-?\d+[SUR][q\\<]:\s*$", line):
+                elif re.match(r".*;\s*$", command_part) or re.match(r"^\d+[q\\<]:\s*$", line) or re.match(r"^\*Rq:$", line) or re.match(r"^-?\d+[SUMR][q\\<]:\s*$", line):
                     command += command_part
                     try:
                         self.process_command(command, output_file, shell_executor)
                     except GlobalShellExecutor.ExecutionError as e:
-                        # error in the daemon shell cannot be recovered
+                        # error of the GlobalShellExecutor cannot be recovered
                         raise
                     except Exception as e:
                         print("FAILED: ", e, file=output_file)
@@ -836,25 +856,25 @@ class SQLIsolationTestCase:
            followed by U (for utility-mode connections) or R (for retrieve-mode
            connection). In 'U' mode or 'R' mode, the
            content-id can alternatively be an asterisk '*' to perform a
-           utility-mode/retrieve-mode query on the master and all primary segments.
+           utility-mode/retrieve-mode query on the coordinator and all primary segments.
            If you want to create multiple connections to the same content-id, just
-           increase N in: "content-id + {gpdb segment node number} * N", 
+           increase N in: "content-id + {gpdb segment node number} * N",
            e.g. if gpdb cluster segment number is 3, then:
-           (1) the master utility connections can be: -1U, -4U, -7U; 
-           (2) the seg0 connections can be: 0U, 3U, 6U; 
-           (3) the seg1 connections can be: 1U, 4U, 7U; 
-           (4) the seg2 connections can be: 2U, 5U, 8U; 
+           (1) the coordinator utility connections can be: -1U, -4U, -7U;
+           (2) the seg0 connections can be: 0U, 3U, 6U;
+           (3) the seg1 connections can be: 1U, 4U, 7U;
+           (4) the seg2 connections can be: 2U, 5U, 8U;
         flag:
             &: expect blocking behavior
             >: running in background without blocking
             <: join an existing session
-            q: quit the given session
+            q: quit the given session without blocking
 
             U: connect in utility mode to primary contentid from gp_segment_configuration
             U&: expect blocking behavior in utility mode (does not currently support an asterisk target)
             U<: join an existing utility mode session (does not currently support an asterisk target)
 
-            R|R&|R<: similar to 'U' meaning execept that the connect is in retrieve mode, here don't
+            R|R&|R<: similar to 'U' meaning except that the connect is in retrieve mode, here don't
                thinking about retrieve mode authentication, just using the normal authentication directly.
 
         An example is:
@@ -868,7 +888,7 @@ class SQLIsolationTestCase:
 
         The isolation tests are specified identical to sql-scripts in normal
         SQLTestCases. However, it is possible to prefix a SQL line with
-        an tranaction identifier followed by a colon (":").
+        an transaction identifier followed by a colon (":").
         The above example would be defined by
         1: BEGIN;
         2: BEGIN;
@@ -888,19 +908,12 @@ class SQLIsolationTestCase:
 
         2& forks the command. It is executed in the background. If the
         command is NOT blocking at this point, it is considered an error.
-        2< joins the background command and outputs the result of the   
+        2< joins the background command and outputs the result of the
         command execution.
 
         Session ids should be smaller than 1024.
 
-        2U: Executes a utility command connected to port 40000. 
-
-        One difference to SQLTestCase is the output of INSERT.
-        SQLTestCase would output "INSERT 0 1" if one tuple is inserted.
-        SQLIsolationTestCase would output "INSERT 1". As the
-        SQLIsolationTestCase needs to have a more fine-grained control
-        over the execution order than possible with PSQL, it uses
-        the pygresql python library instead.
+        2U: Executes a utility command connected to port 40000.
 
         Connecting to a specific database:
         1. If you specify a db_name metadata in the sql file, connect to that database in all open sessions.
@@ -939,13 +952,16 @@ class SQLIsolationTestCase:
         2q:  ---> Will quit the session established with test2db.
 
         The subsequent 2: @db_name test: <sql> will open a new session with the database test and execute the sql against that session.
+        Note: Do not expect blocking behavior from explicit quit statements.
+        This implies that a subsequent statement can execute while the relevant
+        session is still undergoing exit.
 
         Shell Execution for SQL or Output:
 
         @pre_run can be used for executing shell command to change input (i.e. each SQL statement) or get input info;
-        @post_run can be used for executing shell command to change ouput (i.e. the result set printed for each SQL execution)
+        @post_run can be used for executing shell command to change output (i.e. the result set printed for each SQL execution)
         or get output info. Just use the env variable ${RAW_STR} to refer to the input/out stream before shell execution,
-        and the output of the shell commmand will be used as the SQL exeucted or output printed into results file.
+        and the output of the shell command will be used as the SQL executed or output printed into results file.
 
         1: @post_run ' TOKEN1=` echo "${RAW_STR}" | awk \'NR==3\' | awk \'{print $1}\'` && export MATCHSUBS="${MATCHSUBS}${NL}m/${TOKEN1}/${NL}s/${TOKEN1}/token_id1/${NL}" && echo "${RAW_STR}" ': SELECT token,hostname,status FROM GP_ENDPOINTS WHERE cursorname='c1';
         2R: @pre_run ' echo "${RAW_STR}" | sed "s#@TOKEN1#${TOKEN1}#" ': RETRIEVE ALL FROM "@TOKEN1";
@@ -954,7 +970,7 @@ class SQLIsolationTestCase:
         - Sample 1: set env variable ${TOKEN1} to the cell (row 3, col 1) of the result set, and print the raw result.
           The env var ${MATCHSUBS} is used to store the matchsubs section so that we can store it into initfile when
           this test case file is finished executing.
-        - Sample 2: replaceing "@TOKEN1" by generated token which is fetch in sample1
+        - Sample 2: replace "@TOKEN1" by generated token which is fetched in sample1
 
         There are some helper functions which will be sourced automatically to make above
         cases easier. See global_sh_executor.sh for more information.
@@ -967,7 +983,7 @@ class SQLIsolationTestCase:
 
         Some tests are easier to write if it's possible to modify a system
         catalog across the *entire* cluster. To perform a utility-mode query on
-        all segments and the master, you can use *U commands:
+        all segments and the coordinator, you can use *U commands:
 
         *U: SET allow_system_table_mods = true;
         *U: UPDATE pg_catalog.<table> SET <column> = <value> WHERE <cond>;
@@ -1011,33 +1027,33 @@ class SQLIsolationTestCase:
         # Add gucs to the test sql and form the actual sql file to be run
         if not out_dir:
             out_dir = self.get_out_dir()
-            
+
         if not os.path.exists(out_dir):
             TINCSystem.make_dirs(out_dir, ignore_exists_error = True)
-            
+
         if optimizer is None:
             gucs_sql_file = os.path.join(out_dir, os.path.basename(sql_file))
         else:
             # sql file will be <basename>_opt.sql or <basename>_planner.sql based on optimizer
             gucs_sql_file = os.path.join(out_dir, os.path.basename(sql_file).replace('.sql', '_%s.sql' %self._optimizer_suffix(optimizer)))
-            
+
         self._add_gucs_to_sql_file(sql_file, gucs_sql_file, optimizer)
         self.test_artifacts.append(gucs_sql_file)
 
-        
+
         if not out_file:
             if optimizer is None:
                 out_file = os.path.join(self.get_out_dir(), os.path.basename(sql_file).replace('.sql', '.out'))
             else:
                 # out file will be *_opt.out or *_planner.out based on optimizer
                 out_file = os.path.join(self.get_out_dir(), os.path.basename(sql_file).replace('.sql', '_%s.out' %self._optimizer_suffix(optimizer)))
-        
+
         self.test_artifacts.append(out_file)
         executor = SQLIsolationExecutor(dbname=self.db_name)
         with open(out_file, "w") as f:
             executor.process_isolation_file(open(sql_file), f, out_file)
-            f.flush()   
-        
+            f.flush()
+
         if out_file[-2:] == '.t':
             out_file = out_file[:-2]
 

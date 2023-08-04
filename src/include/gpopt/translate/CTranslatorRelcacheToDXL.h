@@ -25,6 +25,7 @@ extern "C" {
 
 #include "access/tupdesc.h"
 #include "catalog/gp_distribution_policy.h"
+#include "foreign/foreign.h"
 }
 
 #include "naucrates/dxl/gpdb_types.h"
@@ -34,9 +35,10 @@ extern "C" {
 #include "naucrates/md/CMDCheckConstraintGPDB.h"
 #include "naucrates/md/CMDFunctionGPDB.h"
 #include "naucrates/md/CMDPartConstraintGPDB.h"
-#include "naucrates/md/CMDRelationExternalGPDB.h"
 #include "naucrates/md/CMDRelationGPDB.h"
 #include "naucrates/md/CMDScalarOpGPDB.h"
+#include "naucrates/md/IMDExtStats.h"
+#include "naucrates/md/IMDExtStatsInfo.h"
 #include "naucrates/md/IMDFunction.h"
 #include "naucrates/md/IMDId.h"
 #include "naucrates/md/IMDIndex.h"
@@ -46,7 +48,7 @@ extern "C" {
 
 // fwd decl
 struct RelationData;
-typedef struct RelationData *Relation;
+using Relation = struct RelationData *;
 struct LogicalIndexes;
 
 namespace gpdxl
@@ -86,9 +88,6 @@ private:
 		// function stability
 		IMDFunction::EFuncStbl m_stability;
 
-		// function data access
-		IMDFunction::EFuncDataAcc m_access;
-
 		// is function strict?
 		BOOL m_is_strict;
 
@@ -97,12 +96,10 @@ private:
 
 	public:
 		// ctor
-		SFuncProps(OID oid, IMDFunction::EFuncStbl stability,
-				   IMDFunction::EFuncDataAcc access, BOOL is_strict,
+		SFuncProps(OID oid, IMDFunction::EFuncStbl stability, BOOL is_strict,
 				   BOOL ReturnsSet)
 			: m_oid(oid),
 			  m_stability(stability),
-			  m_access(access),
 			  m_is_strict(is_strict),
 			  m_returns_set(ReturnsSet)
 		{
@@ -123,13 +120,6 @@ private:
 		GetStability() const
 		{
 			return m_stability;
-		}
-
-		// return data access property
-		IMDFunction::EFuncDataAcc
-		GetDataAccess() const
-		{
-			return m_access;
 		}
 
 		// is function strict?
@@ -155,7 +145,6 @@ private:
 	static void LookupFuncProps(
 		OID func_oid,
 		IMDFunction::EFuncStbl *stability,	// output: function stability
-		IMDFunction::EFuncDataAcc *access,	// output: function data access
 		BOOL *is_strict,					// output: is function strict?
 		BOOL *is_ndv_preserving,			// output: preserves NDVs of inputs
 		BOOL *ReturnsSet,					// output: does function return set?
@@ -164,7 +153,7 @@ private:
 	);
 
 	// check and fall back for unsupported relations
-	static void CheckUnsupportedRelation(OID rel_oid);
+	static void CheckUnsupportedRelation(Relation rel);
 
 	// get type name from the relcache
 	static CMDName *GetTypeName(CMemoryPool *mp, IMDId *mdid);
@@ -172,17 +161,13 @@ private:
 	// get function stability property from the GPDB character representation
 	static CMDFunctionGPDB::EFuncStbl GetFuncStability(CHAR c);
 
-	// get function data access property from the GPDB character representation
-	static CMDFunctionGPDB::EFuncDataAcc GetEFuncDataAccess(CHAR c);
-
 	// get type of aggregate's intermediate result from the relcache
 	static IMDId *RetrieveAggIntermediateResultType(CMemoryPool *mp,
 													IMDId *mdid);
 
 	// retrieve a GPDB metadata object from the relcache
-	static IMDCacheObject *RetrieveObjectGPDB(CMemoryPool *mp,
-											  CMDAccessor *md_accessor,
-											  IMDId *mdid);
+	static IMDCacheObject *RetrieveObjectGPDB(CMemoryPool *mp, IMDId *mdid,
+											  IMDCacheObject::Emdtype mdtype);
 
 	// retrieve relstats object from the relcache
 	static IMDCacheObject *RetrieveRelStats(CMemoryPool *mp, IMDId *mdid);
@@ -260,10 +245,6 @@ private:
 	// check if index is supported
 	static BOOL IsIndexSupported(Relation index_rel);
 
-	// compute the array of included columns
-	static ULongPtrArray *ComputeIncludedCols(CMemoryPool *mp,
-											  const IMDRelation *md_rel);
-
 	// is given level included in the default partitions
 	static BOOL LevelHasDefaultPartition(List *default_levels, ULONG level);
 
@@ -312,16 +293,6 @@ private:
 	static IMdIdArray *RetrieveRelDistributionOpFamilies(CMemoryPool *mp,
 														 GpPolicy *policy);
 
-	// for non-leaf partition tables return the number of child partitions
-	// else return 1
-	static ULONG RetrieveNumChildPartitions(OID rel_oid);
-
-	// generate statistics for the system level columns
-	static CDXLColStats *GenerateStatsForSystemCols(
-		CMemoryPool *mp, OID rel_oid, CMDIdColStats *mdid_col_stats,
-		CMDName *md_colname, OID att_type, AttrNumber attrnum,
-		CDXLBucketArray *dxl_stats_bucket_array, CDouble rows);
-
 	static IMdIdArray *RetrieveIndexPartitions(CMemoryPool *mp, OID rel_oid);
 
 	static IMDRelation::Erelstoragetype RetrieveStorageTypeForPartitionedTable(
@@ -330,8 +301,12 @@ private:
 public:
 	// retrieve a metadata object from the relcache
 	static IMDCacheObject *RetrieveObject(CMemoryPool *mp,
-										  CMDAccessor *md_accessor,
-										  IMDId *mdid);
+										  CMDAccessor *md_accessor, IMDId *mdid,
+										  IMDCacheObject::Emdtype mdtype);
+
+	static IMDCacheObject *RetrieveExtStats(CMemoryPool *mp, IMDId *mdid);
+
+	static IMDCacheObject *RetrieveExtStatsInfo(CMemoryPool *mp, IMDId *mdid);
 
 	// retrieve a relation from the relcache
 	static IMDRelation *RetrieveRel(CMemoryPool *mp, CMDAccessor *md_accessor,
@@ -374,6 +349,9 @@ public:
 
 	// get the distribution policy of the relation
 	static IMDRelation::Ereldistrpolicy GetRelDistribution(GpPolicy *gp_policy);
+
+	static IMDRelation::Ereldistrpolicy
+	GetDistributionFromForeignRelExecLocation(ForeignTable *ft);
 };
 }  // namespace gpdxl
 

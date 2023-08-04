@@ -26,8 +26,10 @@ OBJS        = CDecorrelator.o \
               CXformDifference2LeftAntiSemiJoin.o \
               CXformDifferenceAll2LeftAntiSemiJoin.o \
               CXformDynamicGet2DynamicTableScan.o \
+              CXformDynamicIndexGet2DynamicIndexOnlyScan.o \
               CXformDynamicIndexGet2DynamicIndexScan.o \
               CXformEagerAgg.o \
+              CXformExpandDynamicGetWithForeignPartitions.o \
               CXformExpandFullOuterJoin.o \
               CXformExpandNAryJoin.o \
               CXformExpandNAryJoinDP.o \
@@ -35,7 +37,7 @@ OBJS        = CDecorrelator.o \
               CXformExpandNAryJoinGreedy.o \
               CXformExpandNAryJoinMinCard.o \
               CXformExploration.o \
-              CXformExternalGet2ExternalScan.o \
+              CXformForeignGet2ForeignScan.o \
               CXformFactory.o \
               CXformGbAgg2Apply.o \
               CXformGbAgg2HashAgg.o \
@@ -54,8 +56,6 @@ OBJS        = CDecorrelator.o \
               CXformImplementDynamicBitmapTableGet.o \
               CXformImplementFullOuterMergeJoin.o \
               CXformImplementLimit.o \
-              CXformImplementPartitionSelector.o \
-              CXformImplementRowTrigger.o \
               CXformImplementSequence.o \
               CXformImplementSequenceProject.o \
               CXformImplementSplit.o \
@@ -70,12 +70,12 @@ OBJS        = CDecorrelator.o \
               CXformInnerApply2InnerJoin.o \
               CXformInnerApply2InnerJoinNoCorrelations.o \
               CXformInnerApplyWithOuterKey2InnerJoin.o \
-              CXformInnerJoin2HashJoin.o \
-              CXformInnerJoin2NLJoin.o \
+              CXformImplementInnerJoin.o \
               CXformInsert2DML.o \
               CXformIntersect2Join.o \
               CXformIntersectAll2LeftSemiJoin.o \
               CXformJoin2IndexApply.o \
+              CXformPushJoinBelowUnionAll.o \
               CXformJoin2IndexApplyGeneric.o \
               CXformJoinAssociativity.o \
               CXformJoinCommutativity.o \
@@ -102,7 +102,9 @@ OBJS        = CDecorrelator.o \
               CXformLeftSemiJoin2InnerJoin.o \
               CXformLeftSemiJoin2InnerJoinUnderGb.o \
               CXformLeftSemiJoin2NLJoin.o \
+              CXformLimit2IndexGet.o \
               CXformMaxOneRow2Assert.o \
+              CXformDynamicForeignGet2DynamicForeignScan.o \
               CXformProject2Apply.o \
               CXformProject2ComputeScalar.o \
               CXformPushDownLeftOuterJoin.o \

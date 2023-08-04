@@ -204,12 +204,10 @@ CGroupExpression::SetOptimizationLevel()
 			return;
 		}
 
-		// if we only want plans with multi-stage agg, we generate multi-stage agg
-		// first to avoid later optimization of one stage agg if possible
 		BOOL fMultiStage = CPhysicalAgg::PopConvert(m_pop)->FMultiStage();
 		if (fPreferMultiStageAgg && fMultiStage)
 		{
-			// optimize multi-stage agg first to allow avoiding one-stage agg if possible
+			// optimize multi-stage agg plans first and then one-stage agg plans
 			m_eol = EolHigh;
 		}
 	}
@@ -1117,7 +1115,9 @@ CGroupExpression::ContainsCircularDependencies()
 	{
 		CGroup *child_group = (*child_groups)[ul];
 		if (child_group->FScalar())
+		{
 			continue;
+		}
 		CGroup *child_duplicate_group = child_group->PgroupDuplicate();
 		if (child_duplicate_group != nullptr)
 		{

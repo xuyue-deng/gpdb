@@ -82,7 +82,7 @@ enum config_group
 	WAL_RECOVERY_TARGET,
 	REPLICATION,
 	REPLICATION_SENDING,
-	REPLICATION_MASTER,
+	REPLICATION_PRIMARY,
 	REPLICATION_STANDBY,
 	REPLICATION_SUBSCRIBERS,
 	QUERY_TUNING,
@@ -313,6 +313,7 @@ extern void build_guc_variables(void);
 extern const char *config_enum_lookup_by_value(struct config_enum *record, int val);
 extern bool config_enum_lookup_by_name(struct config_enum *record,
 									   const char *value, int *retval);
+extern bool is_guc_modified(struct config_generic *conf);
 extern struct config_generic **get_explain_guc_options(int *num);
 
 extern bool parse_int(const char *value, int *result, int flags, const char **hintmsg);

@@ -23,7 +23,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
       <dxl:TraceFlags Value="103027,101013,102024,102025,102115,102116,102117,102119,102121,103001,103016"/>
     </dxl:OptimizerConfig>
     <dxl:Metadata SystemIds="0.GPDB">
-      <dxl:GPDBFunc Mdid="0.2049.1.0" Name="to_char" ReturnsSet="false" Stability="Stable" DataAccess="NoSQL" IsStrict="true">
+      <dxl:GPDBFunc Mdid="0.2049.1.0" Name="to_char" ReturnsSet="false" Stability="Stable" IsStrict="true">
         <dxl:ResultType Mdid="0.25.1.0"/>
       </dxl:GPDBFunc>
       <dxl:MDScalarComparison Mdid="4.1114.1.0;1082.1.0;3" Name="&lt;=" ComparisonType="LEq" LeftType="0.1114.1.0" RightType="0.1082.1.0" OperatorMdid="0.2372.1.0"/>
@@ -1062,7 +1062,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
         <dxl:SumAgg Mdid="0.2114.1.0"/>
         <dxl:CountAgg Mdid="0.2147.1.0"/>
       </dxl:Type>
-      <dxl:GPDBFunc Mdid="0.1574.1.0" Name="nextval" ReturnsSet="false" Stability="Volatile" DataAccess="NoSQL" IsStrict="true">
+      <dxl:GPDBFunc Mdid="0.1574.1.0" Name="nextval" ReturnsSet="false" Stability="Volatile" IsStrict="true">
         <dxl:ResultType Mdid="0.20.1.0"/>
       </dxl:GPDBFunc>
       <dxl:ColumnStatistics Mdid="1.4435137.1.1.33" Name="tableoid" Width="4.000000" NullFreq="0.000000" NdvRemain="0.000000" FreqRemain="0.000000"/>
@@ -2139,7 +2139,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
           <dxl:UpperBound Closed="true" TypeMdid="0.1043.1.0" Value="AAAADTU4OTk1NTc3Mg==" LintValue="759579644"/>
         </dxl:StatsBucket>
       </dxl:ColumnStatistics>
-      <dxl:Index Mdid="0.4449193.1.0" Name="order_lineitems_cust_id_1_prt_default_part" IsClustered="false" IndexType="Bitmap" IndexItemType="0.2283.1.0" KeyColumns="4" IncludedColumns="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34">
+      <dxl:Index Mdid="0.4449193.1.0" Name="order_lineitems_cust_id_1_prt_default_part" IsClustered="false" IndexType="Bitmap" IndexItemType="0.2283.1.0" KeyColumns="4" IncludedColumns="">
         <dxl:Opfamilies>
           <dxl:Opfamily Mdid="0.1978.1.0"/>
         </dxl:Opfamilies>
@@ -2171,7 +2171,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
         <dxl:SumAgg Mdid="0.0.0.0"/>
         <dxl:CountAgg Mdid="0.2147.1.0"/>
       </dxl:Type>
-      <dxl:GPDBFunc Mdid="0.6083.1.0" Name="gp_partition_propagation" ReturnsSet="false" Stability="Volatile" DataAccess="NoSQL" IsStrict="true">
+      <dxl:GPDBFunc Mdid="0.6083.1.0" Name="gp_partition_propagation" ReturnsSet="false" Stability="Volatile" IsStrict="true">
         <dxl:ResultType Mdid="0.2278.1.0"/>
       </dxl:GPDBFunc>
       <dxl:GPDBScalarOp Mdid="0.2371.1.0" Name="&lt;" ComparisonType="LT" ReturnsNullOnNullInput="true">
@@ -2187,7 +2187,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
         </dxl:Opfamilies>
       </dxl:GPDBScalarOp>
       <dxl:RelationStatistics Mdid="2.4435137.1.1" Name="order_lineitems" Rows="8371700224.000000" EmptyRelation="false"/>
-      <dxl:Relation Mdid="0.4435137.1.0" Name="order_lineitems" IsTemporary="false" HasOids="false" StorageType="AppendOnly, Row-oriented" DistributionPolicy="Hash" DistributionColumns="0" Keys="33,34,32" PartitionColumns="7" PartitionTypes="r">
+      <dxl:Relation Mdid="6.4435137.1.0" Name="order_lineitems" IsTemporary="false" StorageType="AppendOnly, Row-oriented" DistributionPolicy="Hash" DistributionColumns="0" Keys="33,34,32" PartitionColumns="7" PartitionTypes="r">
         <dxl:Columns>
           <dxl:Column Name="order_id" Attno="1" Mdid="0.1043.1.0" Nullable="true" ColWidth="21">
             <dxl:DefaultValue/>
@@ -2302,7 +2302,6 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
         <dxl:IndexInfoList>
           <dxl:IndexInfo Mdid="0.4449193.1.0" IsPartial="false"/>
         </dxl:IndexInfoList>
-        <dxl:Triggers/>
         <dxl:CheckConstraints/>
         <dxl:PartConstraint DefaultPartition="0" Unbounded="true">
           <dxl:And>
@@ -2329,7 +2328,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
           <dxl:Opfamily Mdid="0.3041.1.0"/>
         </dxl:Opfamilies>
       </dxl:GPDBScalarOp>
-      <dxl:Relation Mdid="0.4435137.1.1" Name="order_lineitems" IsTemporary="false" HasOids="false" StorageType="AppendOnly, Row-oriented" DistributionPolicy="Hash" DistributionColumns="0" Keys="33,34,32" PartitionColumns="7" PartitionTypes="r">
+      <dxl:Relation Mdid="6.4435137.1.1" Name="order_lineitems" IsTemporary="false" StorageType="AppendOnly, Row-oriented" DistributionPolicy="Hash" DistributionColumns="0" Keys="33,34,32" PartitionColumns="7" PartitionTypes="r">
         <dxl:Columns>
           <dxl:Column Name="order_id" Attno="1" Mdid="0.1043.1.0" Nullable="true" ColWidth="21">
             <dxl:DefaultValue/>
@@ -2444,7 +2443,6 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
         <dxl:IndexInfoList>
           <dxl:IndexInfo Mdid="0.4449193.1.0" IsPartial="false"/>
         </dxl:IndexInfoList>
-        <dxl:Triggers/>
         <dxl:CheckConstraints/>
         <dxl:PartConstraint DefaultPartition="0" Unbounded="true">
           <dxl:And>
@@ -2459,7 +2457,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
           </dxl:And>
         </dxl:PartConstraint>
       </dxl:Relation>
-      <dxl:GPDBFunc Mdid="0.6086.1.0" Name="gp_partition_inverse" ReturnsSet="true" Stability="Stable" DataAccess="NoSQL" IsStrict="true">
+      <dxl:GPDBFunc Mdid="0.6086.1.0" Name="gp_partition_inverse" ReturnsSet="true" Stability="Stable" IsStrict="true">
         <dxl:ResultType Mdid="0.2249.1.0"/>
       </dxl:GPDBFunc>
       <dxl:ColumnStatistics Mdid="1.4435137.1.1.31" Name="website_url" Width="121.000000" NullFreq="0.000000" NdvRemain="8371700224.000000" FreqRemain="1.000000"/>
@@ -4201,8 +4199,13 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
           </dxl:GroupingColumns>
           <dxl:ProjList>
             <dxl:ProjElem ColId="37" Alias="num_orders">
-              <dxl:AggFunc AggMdid="0.2147.1.0" AggDistinct="true" AggStage="Normal">
+              <dxl:AggFunc AggMdid="0.2147.1.0" AggDistinct="true" AggStage="Normal" AggKind="n" AggArgTypes="">
+                <dxl:ValuesList ParamType="aggargs">
                 <dxl:Ident ColId="1" ColName="order_id" TypeMdid="0.1043.1.0"/>
+                </dxl:ValuesList>
+                <dxl:ValuesList ParamType="aggdirectargs"/>
+                <dxl:ValuesList ParamType="aggorder"/>
+                <dxl:ValuesList ParamType="aggdistinct"/>
               </dxl:AggFunc>
             </dxl:ProjElem>
           </dxl:ProjList>
@@ -4227,7 +4230,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
                 </dxl:Comparison>
               </dxl:And>
               <dxl:LogicalGet>
-                <dxl:TableDescriptor Mdid="0.4435137.1.1" TableName="order_lineitems">
+                <dxl:TableDescriptor Mdid="6.4435137.1.1" TableName="order_lineitems">
                   <dxl:Columns>
                     <dxl:Column ColId="1" Attno="1" ColName="order_id" TypeMdid="0.1043.1.0" ColWidth="21"/>
                     <dxl:Column ColId="2" Attno="2" ColName="order_item_id" TypeMdid="0.20.1.0"/>
@@ -4331,8 +4334,13 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
                 <dxl:Ident ColId="6" ColName="item_shipment_status_code" TypeMdid="0.1043.1.0"/>
               </dxl:ProjElem>
               <dxl:ProjElem ColId="36" Alias="num_orders">
-                <dxl:AggFunc AggMdid="0.2147.1.0" AggDistinct="false" AggStage="Normal">
+                <dxl:AggFunc AggMdid="0.2147.1.0" AggDistinct="false" AggStage="Normal" AggKind="n" AggArgTypes="">
+                  <dxl:ValuesList ParamType="aggargs">
                   <dxl:Ident ColId="0" ColName="order_id" TypeMdid="0.1043.1.0"/>
+                  </dxl:ValuesList>
+                  <dxl:ValuesList ParamType="aggdirectargs"/>
+                  <dxl:ValuesList ParamType="aggorder"/>
+                  <dxl:ValuesList ParamType="aggdistinct"/>
                 </dxl:AggFunc>
               </dxl:ProjElem>
             </dxl:ProjList>
@@ -4439,7 +4447,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
                           <dxl:Ident ColId="7" ColName="order_datetime" TypeMdid="0.1114.1.0"/>
                         </dxl:ProjElem>
                       </dxl:ProjList>
-                      <dxl:PartitionSelector RelationMdid="0.4435137.1.1" PartitionLevels="1" ScanId="1">
+                      <dxl:PartitionSelector RelationMdid="6.4435137.1.1" PartitionLevels="1" ScanId="1">
                         <dxl:Properties>
                           <dxl:Cost StartupCost="10" TotalCost="100" Rows="100" Width="4"/>
                         </dxl:Properties>
@@ -4532,7 +4540,7 @@ ORDER BY to_char(order_datetime,'YYYY-Q')
                             </dxl:Comparison>
                           </dxl:And>
                         </dxl:Filter>
-                        <dxl:TableDescriptor Mdid="0.4435137.1.1" TableName="order_lineitems">
+                        <dxl:TableDescriptor Mdid="6.4435137.1.1" TableName="order_lineitems">
                           <dxl:Columns>
                             <dxl:Column ColId="0" Attno="1" ColName="order_id" TypeMdid="0.1043.1.0" ColWidth="21"/>
                             <dxl:Column ColId="6" Attno="7" ColName="item_shipment_status_code" TypeMdid="0.1043.1.0" ColWidth="30"/>

@@ -71,7 +71,7 @@ static List *reparameterize_pathlist_by_child(PlannerInfo *root,
 											  List *pathlist,
 											  RelOptInfo *child_rel);
 
-static void set_append_path_locus(PlannerInfo *root, Path *pathnode, RelOptInfo *rel,
+static bool set_append_path_locus(PlannerInfo *root, Path *pathnode, RelOptInfo *rel,
 					  List *pathkeys);
 static CdbPathLocus
 adjust_modifytable_subpaths(PlannerInfo *root, CmdType operation,
@@ -1196,11 +1196,27 @@ create_bitmap_and_path(PlannerInfo *root,
 					   List *bitmapquals)
 {
 	BitmapAndPath *pathnode = makeNode(BitmapAndPath);
+	Relids		required_outer = NULL;
+	ListCell   *lc;
 
 	pathnode->path.pathtype = T_BitmapAnd;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = rel->reltarget;
-	pathnode->path.param_info = NULL;	/* not used in bitmap trees */
+
+	/*
+	 * Identify the required outer rels as the union of what the child paths
+	 * depend on.  (Alternatively, we could insist that the caller pass this
+	 * in, but it's more convenient and reliable to compute it here.)
+	 */
+	foreach(lc, bitmapquals)
+	{
+		Path	   *bitmapqual = (Path *) lfirst(lc);
+
+		required_outer = bms_add_members(required_outer,
+										 PATH_REQ_OUTER(bitmapqual));
+	}
+	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
+														  required_outer);
 
 	/*
 	 * Currently, a BitmapHeapPath, BitmapAndPath, or BitmapOrPath will be
@@ -1232,11 +1248,27 @@ create_bitmap_or_path(PlannerInfo *root,
 					  List *bitmapquals)
 {
 	BitmapOrPath *pathnode = makeNode(BitmapOrPath);
+	Relids		required_outer = NULL;
+	ListCell   *lc;
 
 	pathnode->path.pathtype = T_BitmapOr;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = rel->reltarget;
-	pathnode->path.param_info = NULL;	/* not used in bitmap trees */
+
+	/*
+	 * Identify the required outer rels as the union of what the child paths
+	 * depend on.  (Alternatively, we could insist that the caller pass this
+	 * in, but it's more convenient and reliable to compute it here.)
+	 */
+	foreach(lc, bitmapquals)
+	{
+		Path	   *bitmapqual = (Path *) lfirst(lc);
+
+		required_outer = bms_add_members(required_outer,
+										 PATH_REQ_OUTER(bitmapqual));
+	}
+	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
+														  required_outer);
 
 	/*
 	 * Currently, a BitmapHeapPath, BitmapAndPath, or BitmapOrPath will be
@@ -1382,7 +1414,8 @@ create_append_path(PlannerInfo *root,
 	else
 		pathnode->limit_tuples = -1.0;
 
-    set_append_path_locus(root, (Path *) pathnode, rel, NIL);
+	if (!set_append_path_locus(root, (Path *) pathnode, rel, NIL))
+		return NULL;
 
 	foreach(l, pathnode->subpaths)
 	{
@@ -1508,7 +1541,8 @@ create_merge_append_path(PlannerInfo *root,
 	 * Add Motions to the child nodes as needed, and determine the locus
 	 * of the MergeAppend itself.
 	 */
-	set_append_path_locus(root, (Path *) pathnode, rel, pathkeys);
+	if (!set_append_path_locus(root, (Path *) pathnode, rel, pathkeys))
+		return NULL;
 
 	/*
 	 * Add up the sizes and costs of the input paths.
@@ -1576,8 +1610,9 @@ create_merge_append_path(PlannerInfo *root,
  * Set the locus of an Append or MergeAppend path.
  *
  * This modifies the 'subpaths', costs fields, and locus of 'pathnode'.
+ * It will return false if fails to create motion for parameterized path.
  */
-static void
+static bool
 set_append_path_locus(PlannerInfo *root, Path *pathnode, RelOptInfo *rel,
 					  List *pathkeys)
 {
@@ -1609,7 +1644,7 @@ set_append_path_locus(PlannerInfo *root, Path *pathnode, RelOptInfo *rel,
 	if (!subpaths)
 	{
 		CdbPathLocus_MakeGeneral(&pathnode->locus);
-		return;
+		return true;
 	}
 
 	/*
@@ -1904,6 +1939,9 @@ set_append_path_locus(PlannerInfo *root, Path *pathnode, RelOptInfo *rel,
 				subpath = cdbpath_create_motion_path(root, subpath, pathkeys, false, targetlocus);
 			else
 				subpath = cdbpath_create_motion_path(root, subpath, NIL, false, targetlocus);
+
+			if (subpath == NULL)
+				return false;
 		}
 
 		pathnode->sameslice_relids = bms_union(pathnode->sameslice_relids, subpath->sameslice_relids);
@@ -1919,6 +1957,8 @@ set_append_path_locus(PlannerInfo *root, Path *pathnode, RelOptInfo *rel,
 	pathnode->locus = targetlocus;
 
 	*subpaths_out = new_subpaths;
+
+	return true;
 }
 
 /*
@@ -2835,19 +2875,19 @@ create_functionscan_path(PlannerInfo *root, RelOptInfo *rel,
 						break;
 					case PROEXECLOCATION_COORDINATOR:
 						/*
-						 * This function forces the execution to master.
+						 * This function forces the execution to coordinator.
 						 */
 						if (exec_location == PROEXECLOCATION_ALL_SEGMENTS)
 						{
 							ereport(ERROR,
 									(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									 (errmsg("cannot mix EXECUTE ON MASTER and ALL SEGMENTS functions in same function scan"))));
+									 (errmsg("cannot mix EXECUTE ON COORDINATOR and ALL SEGMENTS functions in same function scan"))));
 						}
 						exec_location = PROEXECLOCATION_COORDINATOR;
 						break;
 					case PROEXECLOCATION_INITPLAN:
 						/*
-						 * This function forces the execution to master.
+						 * This function forces the execution to coordinator.
 						 */
 						if (exec_location == PROEXECLOCATION_ALL_SEGMENTS)
 						{
@@ -2865,7 +2905,7 @@ create_functionscan_path(PlannerInfo *root, RelOptInfo *rel,
 						{
 							ereport(ERROR,
 									(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									 (errmsg("cannot mix EXECUTE ON MASTER and ALL SEGMENTS functions in same function scan"))));
+									 (errmsg("cannot mix EXECUTE ON COORDINATOR and ALL SEGMENTS functions in same function scan"))));
 						}
 						exec_location = PROEXECLOCATION_ALL_SEGMENTS;
 						break;
@@ -2893,7 +2933,7 @@ create_functionscan_path(PlannerInfo *root, RelOptInfo *rel,
 				 * If all the functions are ON ANY, we presumably could execute
 				 * the function scan anywhere. However, historically, before the
 				 * EXECUTE ON syntax was introduced, we always executed
-				 * non-IMMUTABLE functions on the master. Keep that behavior
+				 * non-IMMUTABLE functions on the coordinator. Keep that behavior
 				 * for backwards compatibility.
 				 */
 				if (contain_outer_params)
@@ -2905,7 +2945,7 @@ create_functionscan_path(PlannerInfo *root, RelOptInfo *rel,
 				break;
 			case PROEXECLOCATION_COORDINATOR:
 				if (contain_outer_params)
-					elog(ERROR, "cannot execute EXECUTE ON MASTER function in a subquery with arguments from outer query");
+					elog(ERROR, "cannot execute EXECUTE ON COORDINATOR function in a subquery with arguments from outer query");
 				CdbPathLocus_MakeEntry(&pathnode->locus);
 				break;
 			case PROEXECLOCATION_INITPLAN:
@@ -3190,22 +3230,15 @@ create_resultscan_path(PlannerInfo *root, RelOptInfo *rel,
 
 	{
 		char		exec_location;
-
 		exec_location = check_execute_on_functions((Node *) rel->reltarget->exprs);
 
-		if (exec_location == PROEXECLOCATION_COORDINATOR)
-			CdbPathLocus_MakeEntry(&pathnode->locus);
-		else if (exec_location == PROEXECLOCATION_ALL_SEGMENTS)
-		{
-			/* GPDB_12_MERGE_FIXME: I'm not sure if this makes sense. This
-			 * would return multiple rows, one for each segment, but usually
-			 * a "SELECT func()" is expected to return just one row.
-			 */
-			CdbPathLocus_MakeStrewn(&pathnode->locus,
-									getgpsegmentCount());
-		}
-		else
-			CdbPathLocus_MakeGeneral(&pathnode->locus);
+		/*
+		 * A function with EXECUTE ON { COORDINATOR | ALL SEGMENTS } attribute
+		 * must be a set-returning function, a subquery has set-returning 
+		 * functions in tlist can't be pulled up as RTE_RESULT relation.
+		 */
+		Assert(exec_location == PROEXECLOCATION_ANY);
+		CdbPathLocus_MakeGeneral(&pathnode->locus);
 	}
 
 	cost_resultscan(pathnode, root, rel, pathnode->param_info);
@@ -3224,6 +3257,37 @@ create_worktablescan_path(PlannerInfo *root, RelOptInfo *rel,
 						  Relids required_outer)
 {
 	Path	   *pathnode = makeNode(Path);
+	CdbPathLocus result;
+
+	/*
+	 * Between Recursive union plannode node and WorkTableScan plannode
+	 * there must be no Motion nodes because the execution of WorkTableScan
+	 * depends on the Recursive union's data structure.
+	 *
+	 * To avoid Motion nodes, we set the locus of the WorkTableScan to Strewn
+	 * for certain cases. For example, if the locus of the non-recursive path of
+	 * the CTE is Hashed, we need to set the locus of the WorkTableScan to Strewn
+	 * instead of Hashed. Otherwise, if the WorkTableScan is part of a JOIN, we
+	 * could end up redistribute the other side (always inner side for now) of
+	 * the JOIN with incorrect hash keys.
+	 */
+	if (ctelocus.locustype == CdbLocusType_Entry)
+		CdbPathLocus_MakeEntry(&result);
+	else if (ctelocus.locustype == CdbLocusType_SingleQE)
+		CdbPathLocus_MakeSingleQE(&result, ctelocus.numsegments);
+	else if (ctelocus.locustype == CdbLocusType_General)
+		CdbPathLocus_MakeGeneral(&result);
+	else if (ctelocus.locustype == CdbLocusType_OuterQuery)
+		CdbPathLocus_MakeOuterQuery(&result);
+	else if (ctelocus.locustype == CdbLocusType_SegmentGeneral)
+	{
+		/* See comments in set_worktable_pathlist */
+		elog(ERROR,
+			 "worktable scan path can never have "
+			 "segmentgeneral locus.");
+	}
+	else
+		CdbPathLocus_MakeStrewn(&result, ctelocus.numsegments);
 
 	pathnode->pathtype = T_WorkTableScan;
 	pathnode->parent = rel;
@@ -3235,7 +3299,7 @@ create_worktablescan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_workers = 0;
 	pathnode->pathkeys = NIL;	/* result is always unordered */
 
-	pathnode->locus = ctelocus;
+	pathnode->locus = result;
 	pathnode->motionHazard = false;
 	pathnode->rescannable = true;
 	pathnode->sameslice_relids = rel->relids;
@@ -3311,22 +3375,28 @@ create_foreignscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.startup_cost = startup_cost;
 	pathnode->path.total_cost = total_cost;
 	pathnode->path.pathkeys = pathkeys;
-
-	switch (rel->exec_location)
+	if (Gp_role == GP_ROLE_DISPATCH)
 	{
-		case FTEXECLOCATION_ANY:
-			CdbPathLocus_MakeGeneral(&(pathnode->path.locus));
-			break;
-		case FTEXECLOCATION_ALL_SEGMENTS:
-			CdbPathLocus_MakeStrewn(&(pathnode->path.locus), getgpsegmentCount());
-			break;
-		case FTEXECLOCATION_COORDINATOR:
-			CdbPathLocus_MakeEntry(&(pathnode->path.locus));
-			break;
-		default:
-			elog(ERROR, "unrecognized exec_location '%c'", rel->exec_location);
+		switch (rel->exec_location)
+		{
+			case FTEXECLOCATION_ANY:
+				CdbPathLocus_MakeGeneral(&(pathnode->path.locus));
+				break;
+			case FTEXECLOCATION_ALL_SEGMENTS:
+				pathnode->path.locus = cdbpathlocus_from_baserel(root, rel);
+				break;
+			case FTEXECLOCATION_COORDINATOR:
+				CdbPathLocus_MakeEntry(&(pathnode->path.locus));
+				break;
+			default:
+				elog(ERROR, "unrecognized exec_location '%c'", rel->exec_location);
+		}
 	}
-
+	else
+	{
+		/* make entry locus for utility role */
+		CdbPathLocus_MakeEntry(&(pathnode->path.locus));
+	}
 	pathnode->fdw_outerpath = fdw_outerpath;
 	pathnode->fdw_private = fdw_private;
 
@@ -3376,22 +3446,34 @@ create_foreign_join_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.startup_cost = startup_cost;
 	pathnode->path.total_cost = total_cost;
 	pathnode->path.pathkeys = pathkeys;
-
-	switch (rel->exec_location)
+	if (Gp_role == GP_ROLE_DISPATCH)
 	{
-		case FTEXECLOCATION_ANY:
-			CdbPathLocus_MakeGeneral(&(pathnode->path.locus));
-			break;
-		case FTEXECLOCATION_ALL_SEGMENTS:
-			CdbPathLocus_MakeStrewn(&(pathnode->path.locus), getgpsegmentCount());
-			break;
-		case FTEXECLOCATION_COORDINATOR:
-			CdbPathLocus_MakeEntry(&(pathnode->path.locus));
-			break;
-		default:
-			elog(ERROR, "unrecognized exec_location '%c'", rel->exec_location);
-	}
+		ForeignServer *server = NULL;
 
+		switch (rel->exec_location)
+		{
+			case FTEXECLOCATION_ANY:
+				CdbPathLocus_MakeGeneral(&(pathnode->path.locus));
+				break;
+			case FTEXECLOCATION_ALL_SEGMENTS:
+				server = GetForeignServer(rel->serverid);
+				if (server)
+					CdbPathLocus_MakeStrewn(&(pathnode->path.locus), server->num_segments);
+				else
+					CdbPathLocus_MakeStrewn(&(pathnode->path.locus), getgpsegmentCount());
+				break;
+			case FTEXECLOCATION_COORDINATOR:
+				CdbPathLocus_MakeEntry(&(pathnode->path.locus));
+				break;
+			default:
+				elog(ERROR, "unrecognized exec_location '%c'", rel->exec_location);
+		}
+	}
+	else
+	{
+		/* make entry locus for utility role */
+		CdbPathLocus_MakeEntry(&(pathnode->path.locus));
+	}
 	pathnode->fdw_outerpath = fdw_outerpath;
 	pathnode->fdw_private = fdw_private;
 
@@ -3418,7 +3500,6 @@ create_foreign_upper_path(PlannerInfo *root, RelOptInfo *rel,
 						  List *fdw_private)
 {
 	ForeignPath *pathnode = makeNode(ForeignPath);
-
 	/*
 	 * Upper relations should never have any lateral references, since joining
 	 * is complete.
@@ -3436,22 +3517,34 @@ create_foreign_upper_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.startup_cost = startup_cost;
 	pathnode->path.total_cost = total_cost;
 	pathnode->path.pathkeys = pathkeys;
-
-	switch (rel->exec_location)
+	if (Gp_role == GP_ROLE_DISPATCH)
 	{
-		case FTEXECLOCATION_ANY:
-			CdbPathLocus_MakeGeneral(&(pathnode->path.locus));
-			break;
-		case FTEXECLOCATION_ALL_SEGMENTS:
-			CdbPathLocus_MakeStrewn(&(pathnode->path.locus), getgpsegmentCount());
-			break;
-		case FTEXECLOCATION_COORDINATOR:
-			CdbPathLocus_MakeEntry(&(pathnode->path.locus));
-			break;
-		default:
-			elog(ERROR, "unrecognized exec_location '%c'", rel->exec_location);
-	}
+		ForeignServer *server = NULL;
 
+		switch (rel->exec_location)
+		{
+			case FTEXECLOCATION_ANY:
+				CdbPathLocus_MakeGeneral(&(pathnode->path.locus));
+				break;
+			case FTEXECLOCATION_ALL_SEGMENTS:
+				server = GetForeignServer(rel->serverid);
+				if (server)
+					CdbPathLocus_MakeStrewn(&(pathnode->path.locus), server->num_segments);
+				else
+					CdbPathLocus_MakeStrewn(&(pathnode->path.locus), getgpsegmentCount());
+				break;
+			case FTEXECLOCATION_COORDINATOR:
+				CdbPathLocus_MakeEntry(&(pathnode->path.locus));
+				break;
+			default:
+				elog(ERROR, "unrecognized exec_location '%c'", rel->exec_location);
+		}
+	}
+	else
+	{
+		/* make entry locus for utility role */
+		CdbPathLocus_MakeEntry(&(pathnode->path.locus));
+	}
 	pathnode->fdw_outerpath = fdw_outerpath;
 	pathnode->fdw_private = fdw_private;
 
@@ -4082,7 +4175,25 @@ create_projection_path_with_quals(PlannerInfo *root,
 								  bool need_param)
 {
 	ProjectionPath *pathnode = makeNode(ProjectionPath);
-	PathTarget *oldtarget = subpath->pathtarget;
+	PathTarget *oldtarget;
+
+	/*
+	 * We mustn't put a ProjectionPath directly above another; it's useless
+	 * and will confuse create_projection_plan.  Rather than making sure all
+	 * callers handle that, let's implement it here, by stripping off any
+	 * ProjectionPath in what we're given.  Given this rule, there won't be
+	 * more than one.
+	 */
+	if (IsA(subpath, ProjectionPath))
+	{
+		ProjectionPath *subpp = (ProjectionPath *) subpath;
+
+		Assert(subpp->path.parent == rel);
+		subpath = subpp->subpath;
+		if (subpp->cdb_restrict_clauses != NIL)
+			restrict_clauses = list_concat_unique(restrict_clauses, subpp->cdb_restrict_clauses);
+		Assert(!IsA(subpath, ProjectionPath));
+	}
 
 	pathnode->path.pathtype = T_Result;
 	pathnode->path.parent = rel;
@@ -4113,6 +4224,7 @@ create_projection_path_with_quals(PlannerInfo *root,
 	 * Filters, we could push them down too. But currently this is only used on
 	 * top of Material paths, which don't support it, so it doesn't matter.
 	 */
+	oldtarget = subpath->pathtarget;
 	if (!restrict_clauses &&
 		(is_projection_capable_path(subpath) ||
 		 equal(oldtarget->exprs, target->exprs)))
@@ -4609,7 +4721,6 @@ create_tup_split_path(PlannerInfo *root,
  * 'having_qual' is the HAVING quals if any
  * 'rollups' is a list of RollupData nodes
  * 'agg_costs' contains cost info about the aggregate functions to be computed
- * 'numGroups' is the estimated total number of groups
  */
 GroupingSetsPath *
 create_groupingsets_path(PlannerInfo *root,
@@ -4619,8 +4730,7 @@ create_groupingsets_path(PlannerInfo *root,
 						 List *having_qual,
 						 AggStrategy aggstrategy,
 						 List *rollups,
-						 const AggClauseCosts *agg_costs,
-						 double numGroups)
+						 const AggClauseCosts *agg_costs)
 {
 	GroupingSetsPath *pathnode = makeNode(GroupingSetsPath);
 	PathTarget *target = rel->reltarget;
@@ -5295,7 +5405,7 @@ adjust_modifytable_subpaths(PlannerInfo *root, CmdType operation,
 		}
 		else if (targetPolicyType == POLICYTYPE_ENTRY)
 		{
-			/* Master-only table */
+			/* Coordinator-only table */
 			all_subplans_replicated = false;
 		}
 		else if (targetPolicyType == POLICYTYPE_REPLICATED)
@@ -5675,7 +5785,7 @@ do { \
 	(path) = reparameterize_path_by_child(root, (path), child_rel); \
 	if ((path) == NULL) \
 		return NULL; \
-} while(0);
+} while(0)
 
 #define REPARAMETERIZE_CHILD_PATH_LIST(pathlist) \
 do { \
@@ -5686,7 +5796,7 @@ do { \
 		if ((pathlist) == NIL) \
 			return NULL; \
 	} \
-} while(0);
+} while(0)
 
 	Path	   *new_path;
 	ParamPathInfo *new_ppi;
@@ -5701,7 +5811,18 @@ do { \
 		!bms_overlap(PATH_REQ_OUTER(path), child_rel->top_parent_relids))
 		return path;
 
-	/* Reparameterize a copy of given path. */
+	/*
+	 * If possible, reparameterize the given path, making a copy.
+	 *
+	 * This function is currently only applied to the inner side of a nestloop
+	 * join that is being partitioned by the partitionwise-join code.  Hence,
+	 * we need only support path types that plausibly arise in that context.
+	 * (In particular, supporting sorted path types would be a waste of code
+	 * and cycles: even if we translated them here, they'd just lose in
+	 * subsequent cost comparisons.)  If we do see an unsupported path type,
+	 * that just means we won't be able to generate a partitionwise-join plan
+	 * using that path type.
+	 */
 	switch (nodeTag(path))
 	{
 		case T_Path:
@@ -5745,16 +5866,6 @@ do { \
 				FLAT_COPY_PATH(bopath, path, BitmapOrPath);
 				REPARAMETERIZE_CHILD_PATH_LIST(bopath->bitmapquals);
 				new_path = (Path *) bopath;
-			}
-			break;
-
-		case T_TidPath:
-			{
-				TidPath    *tpath;
-
-				FLAT_COPY_PATH(tpath, path, TidPath);
-				ADJUST_CHILD_ATTRS(tpath->tidquals);
-				new_path = (Path *) tpath;
 			}
 			break;
 
@@ -5848,37 +5959,6 @@ do { \
 			}
 			break;
 
-		case T_MergeAppendPath:
-			{
-				MergeAppendPath *mapath;
-
-				FLAT_COPY_PATH(mapath, path, MergeAppendPath);
-				REPARAMETERIZE_CHILD_PATH_LIST(mapath->subpaths);
-				new_path = (Path *) mapath;
-			}
-			break;
-
-		case T_MaterialPath:
-			{
-				MaterialPath *mpath;
-
-				FLAT_COPY_PATH(mpath, path, MaterialPath);
-				REPARAMETERIZE_CHILD_PATH(mpath->subpath);
-				new_path = (Path *) mpath;
-			}
-			break;
-
-		case T_UniquePath:
-			{
-				UniquePath *upath;
-
-				FLAT_COPY_PATH(upath, path, UniquePath);
-				REPARAMETERIZE_CHILD_PATH(upath->subpath);
-				ADJUST_CHILD_ATTRS(upath->uniq_exprs);
-				new_path = (Path *) upath;
-			}
-			break;
-
 		case T_GatherPath:
 			{
 				GatherPath *gpath;
@@ -5886,16 +5966,6 @@ do { \
 				FLAT_COPY_PATH(gpath, path, GatherPath);
 				REPARAMETERIZE_CHILD_PATH(gpath->subpath);
 				new_path = (Path *) gpath;
-			}
-			break;
-
-		case T_GatherMergePath:
-			{
-				GatherMergePath *gmpath;
-
-				FLAT_COPY_PATH(gmpath, path, GatherMergePath);
-				REPARAMETERIZE_CHILD_PATH(gmpath->subpath);
-				new_path = (Path *) gmpath;
 			}
 			break;
 

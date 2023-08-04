@@ -21,7 +21,7 @@
     </dxl:OptimizerConfig>
     <dxl:Metadata SystemIds="0.GPDB">
       <dxl:RelationStatistics Mdid="2.24588.1.1" Name="foo" Rows="101808.000000" EmptyRelation="false"/>
-      <dxl:Relation Mdid="0.24588.1.1" Name="foo" IsTemporary="false" HasOids="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="8,2">
+      <dxl:Relation Mdid="6.24588.1.1" Name="foo" IsTemporary="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="8,2">
         <dxl:Columns>
           <dxl:Column Name="a" Attno="1" Mdid="0.23.1.0" Nullable="true" ColWidth="4">
             <dxl:DefaultValue/>
@@ -52,7 +52,6 @@
           </dxl:Column>
         </dxl:Columns>
         <dxl:IndexInfoList/>
-        <dxl:Triggers/>
         <dxl:CheckConstraints/>
       </dxl:Relation>
       <dxl:Type Mdid="0.16.1.0" Name="bool" IsRedistributable="true" IsHashable="true" IsMergeJoinable="true" IsComposite="false" IsFixedLength="true" Length="1" PassByValue="true">
@@ -314,18 +313,28 @@
         <dxl:GroupingColumns/>
         <dxl:ProjList>
           <dxl:ProjElem ColId="10" Alias="count">
-            <dxl:AggFunc AggMdid="0.2147.1.0" AggDistinct="true" AggStage="Normal">
+            <dxl:AggFunc AggMdid="0.2147.1.0" AggDistinct="true" AggStage="Normal" AggKind="n" AggArgTypes="">
+              <dxl:ValuesList ParamType="aggargs">
               <dxl:Ident ColId="2" ColName="b" TypeMdid="0.23.1.0"/>
+              </dxl:ValuesList>
+              <dxl:ValuesList ParamType="aggdirectargs"/>
+              <dxl:ValuesList ParamType="aggorder"/>
+              <dxl:ValuesList ParamType="aggdistinct"/>
             </dxl:AggFunc>
           </dxl:ProjElem>
           <dxl:ProjElem ColId="11" Alias="sum">
-            <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Normal">
+            <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Normal" AggKind="n" AggArgTypes="">
+              <dxl:ValuesList ParamType="aggargs">
               <dxl:Ident ColId="2" ColName="b" TypeMdid="0.23.1.0"/>
+              </dxl:ValuesList>
+              <dxl:ValuesList ParamType="aggdirectargs"/>
+              <dxl:ValuesList ParamType="aggorder"/>
+              <dxl:ValuesList ParamType="aggdistinct"/>
             </dxl:AggFunc>
           </dxl:ProjElem>
         </dxl:ProjList>
         <dxl:LogicalGet>
-          <dxl:TableDescriptor Mdid="0.24588.1.1" TableName="foo">
+          <dxl:TableDescriptor Mdid="6.24588.1.1" TableName="foo">
             <dxl:Columns>
               <dxl:Column ColId="1" Attno="1" ColName="a" TypeMdid="0.23.1.0"/>
               <dxl:Column ColId="2" Attno="2" ColName="b" TypeMdid="0.23.1.0"/>
@@ -341,28 +350,38 @@
         </dxl:LogicalGet>
       </dxl:LogicalGroupBy>
     </dxl:Query>
-    <dxl:Plan Id="0" SpaceSize="9">
+    <dxl:Plan Id="0" SpaceSize="14">
       <dxl:Aggregate AggregationStrategy="Plain" StreamSafe="false">
         <dxl:Properties>
-          <dxl:Cost StartupCost="0" TotalCost="438.791035" Rows="1.000000" Width="16"/>
+          <dxl:Cost StartupCost="0" TotalCost="438.619703" Rows="1.000000" Width="16"/>
         </dxl:Properties>
         <dxl:GroupingColumns/>
         <dxl:ProjList>
           <dxl:ProjElem ColId="9" Alias="count">
-            <dxl:AggFunc AggMdid="0.2147.1.0" AggDistinct="false" AggStage="Normal">
-              <dxl:Ident ColId="1" ColName="b" TypeMdid="0.23.1.0"/>
+            <dxl:AggFunc AggMdid="0.2147.1.0" AggDistinct="false" AggStage="Normal" AggKind="n" AggArgTypes="">
+              <dxl:ValuesList ParamType="aggargs">
+                <dxl:Ident ColId="1" ColName="b" TypeMdid="0.23.1.0"/>
+              </dxl:ValuesList>
+              <dxl:ValuesList ParamType="aggdirectargs"/>
+              <dxl:ValuesList ParamType="aggorder"/>
+              <dxl:ValuesList ParamType="aggdistinct"/>
             </dxl:AggFunc>
           </dxl:ProjElem>
           <dxl:ProjElem ColId="10" Alias="sum">
-            <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Final">
-              <dxl:Ident ColId="12" ColName="ColRef_0012" TypeMdid="0.20.1.0"/>
+            <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Final" AggKind="n" AggArgTypes="">
+              <dxl:ValuesList ParamType="aggargs">
+                <dxl:Ident ColId="12" ColName="ColRef_0012" TypeMdid="0.20.1.0"/>
+              </dxl:ValuesList>
+              <dxl:ValuesList ParamType="aggdirectargs"/>
+              <dxl:ValuesList ParamType="aggorder"/>
+              <dxl:ValuesList ParamType="aggdistinct"/>
             </dxl:AggFunc>
           </dxl:ProjElem>
         </dxl:ProjList>
         <dxl:Filter/>
         <dxl:GatherMotion InputSegments="0,1" OutputSegments="-1">
           <dxl:Properties>
-            <dxl:Cost StartupCost="0" TotalCost="438.791025" Rows="2.000000" Width="12"/>
+            <dxl:Cost StartupCost="0" TotalCost="438.619692" Rows="2.000000" Width="12"/>
           </dxl:Properties>
           <dxl:ProjList>
             <dxl:ProjElem ColId="1" Alias="b">
@@ -376,7 +395,7 @@
           <dxl:SortingColumnList/>
           <dxl:Result>
             <dxl:Properties>
-              <dxl:Cost StartupCost="0" TotalCost="438.790917" Rows="2.000000" Width="12"/>
+              <dxl:Cost StartupCost="0" TotalCost="438.619584" Rows="2.000000" Width="12"/>
             </dxl:Properties>
             <dxl:ProjList>
               <dxl:ProjElem ColId="1" Alias="b">
@@ -390,15 +409,20 @@
             <dxl:OneTimeFilter/>
             <dxl:Aggregate AggregationStrategy="Sorted" StreamSafe="false">
               <dxl:Properties>
-                <dxl:Cost StartupCost="0" TotalCost="438.790917" Rows="2.000000" Width="12"/>
+                <dxl:Cost StartupCost="0" TotalCost="438.619584" Rows="2.000000" Width="12"/>
               </dxl:Properties>
               <dxl:GroupingColumns>
                 <dxl:GroupingColumn ColId="1"/>
               </dxl:GroupingColumns>
               <dxl:ProjList>
                 <dxl:ProjElem ColId="12" Alias="ColRef_0012">
-                  <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Intermediate">
-                    <dxl:Ident ColId="11" ColName="ColRef_0011" TypeMdid="0.20.1.0"/>
+                  <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Intermediate" AggKind="n" AggArgTypes="">
+                    <dxl:ValuesList ParamType="aggargs">
+                      <dxl:Ident ColId="11" ColName="ColRef_0011" TypeMdid="0.20.1.0"/>
+                    </dxl:ValuesList>
+                    <dxl:ValuesList ParamType="aggdirectargs"/>
+                    <dxl:ValuesList ParamType="aggorder"/>
+                    <dxl:ValuesList ParamType="aggdistinct"/>
                   </dxl:AggFunc>
                 </dxl:ProjElem>
                 <dxl:ProjElem ColId="1" Alias="b">
@@ -408,7 +432,7 @@
               <dxl:Filter/>
               <dxl:Sort SortDiscardDuplicates="false">
                 <dxl:Properties>
-                  <dxl:Cost StartupCost="0" TotalCost="438.790898" Rows="2.000000" Width="12"/>
+                  <dxl:Cost StartupCost="0" TotalCost="438.619565" Rows="2.000000" Width="12"/>
                 </dxl:Properties>
                 <dxl:ProjList>
                   <dxl:ProjElem ColId="1" Alias="b">
@@ -426,7 +450,7 @@
                 <dxl:LimitOffset/>
                 <dxl:RedistributeMotion InputSegments="0,1" OutputSegments="0,1">
                   <dxl:Properties>
-                    <dxl:Cost StartupCost="0" TotalCost="438.790898" Rows="2.000000" Width="12"/>
+                    <dxl:Cost StartupCost="0" TotalCost="438.619565" Rows="2.000000" Width="12"/>
                   </dxl:Properties>
                   <dxl:ProjList>
                     <dxl:ProjElem ColId="1" Alias="b">
@@ -445,7 +469,7 @@
                   </dxl:HashExprList>
                   <dxl:Result>
                     <dxl:Properties>
-                      <dxl:Cost StartupCost="0" TotalCost="438.790861" Rows="2.000000" Width="12"/>
+                      <dxl:Cost StartupCost="0" TotalCost="438.619528" Rows="2.000000" Width="12"/>
                     </dxl:Properties>
                     <dxl:ProjList>
                       <dxl:ProjElem ColId="1" Alias="b">
@@ -459,15 +483,20 @@
                     <dxl:OneTimeFilter/>
                     <dxl:Aggregate AggregationStrategy="Hashed" StreamSafe="true">
                       <dxl:Properties>
-                        <dxl:Cost StartupCost="0" TotalCost="438.790861" Rows="2.000000" Width="12"/>
+                        <dxl:Cost StartupCost="0" TotalCost="438.619528" Rows="2.000000" Width="12"/>
                       </dxl:Properties>
                       <dxl:GroupingColumns>
                         <dxl:GroupingColumn ColId="1"/>
                       </dxl:GroupingColumns>
                       <dxl:ProjList>
                         <dxl:ProjElem ColId="11" Alias="ColRef_0011">
-                          <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Partial">
-                            <dxl:Ident ColId="1" ColName="b" TypeMdid="0.23.1.0"/>
+                          <dxl:AggFunc AggMdid="0.2108.1.0" AggDistinct="false" AggStage="Partial" AggKind="n" AggArgTypes="">
+                            <dxl:ValuesList ParamType="aggargs">
+                              <dxl:Ident ColId="1" ColName="b" TypeMdid="0.23.1.0"/>
+                            </dxl:ValuesList>
+                            <dxl:ValuesList ParamType="aggdirectargs"/>
+                            <dxl:ValuesList ParamType="aggorder"/>
+                            <dxl:ValuesList ParamType="aggdistinct"/>
                           </dxl:AggFunc>
                         </dxl:ProjElem>
                         <dxl:ProjElem ColId="1" Alias="b">
@@ -485,7 +514,7 @@
                           </dxl:ProjElem>
                         </dxl:ProjList>
                         <dxl:Filter/>
-                        <dxl:TableDescriptor Mdid="0.24588.1.1" TableName="foo">
+                        <dxl:TableDescriptor Mdid="6.24588.1.1" TableName="foo">
                           <dxl:Columns>
                             <dxl:Column ColId="0" Attno="1" ColName="a" TypeMdid="0.23.1.0"/>
                             <dxl:Column ColId="1" Attno="2" ColName="b" TypeMdid="0.23.1.0"/>

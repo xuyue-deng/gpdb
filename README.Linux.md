@@ -1,38 +1,14 @@
-## For CentOS:
+## For RHEL/Rocky8:
 
-- Install Dependencies
-
-  ```bash
-  ./README.CentOS.bash
-  ```
-
-- If you want to link cmake3 to cmake, run:
-
-  ```bash
-  sudo ln -sf /usr/bin/cmake3 /usr/local/bin/cmake
-  ```
-
-- Make sure that you add `/usr/local/lib` and `/usr/local/lib64` to
-`/etc/ld.so.conf`, then run command `ldconfig`.
-
-- If you want to install and use gcc-7 by default, run:
-
-  ```bash
-  sudo yum install -y centos-release-scl
-  sudo yum install -y devtoolset-7-toolchain
-  echo 'source scl_source enable devtoolset-7' >> ~/.bashrc
-  ```
-
-## For RHEL
-
-Use dependency script for CentOS.
-
-- If you want to install `devtoolset-7`:
-
-  ```bash
-  sudo yum-config-manager --enable rhui-REGION-rhel-server-rhscl
-  sudo yum install -y devtoolset-7-toolchain
-  ```
+  - For EL versions (> 8.0):
+    - Install git
+      ```bash
+      sudo yum install git
+      ```
+  - Install dependencies using README.Rhel-Rocky.bash script.
+       ```bash
+       ./README.Rhel-Rocky.bash
+       ```
 
 ## For Ubuntu:
 
@@ -80,7 +56,7 @@ then run command `ldconfig`.
 1. Verify that you can ssh to your machine name without a password.
 
    ```bash
-    ssh <hostname of your machine>  # e.g., ssh briarwood (You can use `hostname` to get the hostname of your machine.)
+   ssh <hostname of your machine>  # e.g., ssh briarwood (You can use `hostname` to get the hostname of your machine.)
    ```
 
 1. Set up your system configuration by following the installation guide on [docs.greenplum.org](https://docs.greenplum.org)

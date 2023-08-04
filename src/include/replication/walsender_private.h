@@ -31,8 +31,7 @@ typedef enum WalSndState
 /*
  * Each walsender has a WalSnd struct in shared memory.
  *
- * This struct is protected by 'mutex', with two exceptions: one is
- * sync_standby_priority as noted below.  The other exception is that some
+ * This struct is protected by its 'mutex' spinlock field, except that some
  * members are only written by the walsender process itself, and thus that
  * process is free to read those members without holding spinlock.  pid and
  * needreload always require the spinlock to be held for all accesses.
@@ -80,7 +79,7 @@ typedef struct WalSnd
 	TimeOffset	flushLag;
 	TimeOffset	applyLag;
 
-	/* Protects shared variables shown above. */
+	/* Protects shared variables shown above (and sync_standby_priority). */
 	slock_t		mutex;
 
 	/*
@@ -91,8 +90,7 @@ typedef struct WalSnd
 
 	/*
 	 * The priority order of the standby managed by this WALSender, as listed
-	 * in synchronous_standby_names, or 0 if not-listed. Protected by
-	 * SyncRepLock.
+	 * in synchronous_standby_names, or 0 if not-listed.
 	 */
 	int			sync_standby_priority;
 
@@ -110,7 +108,12 @@ typedef struct WalSnd
 
 extern WalSnd *MyWalSnd;
 
+/*
+ * GPDB: Meant to hold persistent state about a walsender<->walreceiver
+ * connection, on the walsender side, even if the walsender has died.
+ */
 typedef enum
+
 {
 	WALSNDERROR_NONE = 0,
 	WALSNDERROR_WALREAD
@@ -182,6 +185,7 @@ extern int	replication_yylex(void);
 extern void replication_yyerror(const char *str) pg_attribute_noreturn();
 extern void replication_scanner_init(const char *query_string);
 extern void replication_scanner_finish(void);
+extern bool replication_scanner_is_replication_command(void);
 
 extern Node *replication_parse_result;
 

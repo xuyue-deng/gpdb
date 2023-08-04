@@ -13,6 +13,8 @@
 
 #include "pg_upgrade.h"
 
+#include "greenplum/pg_upgrade_greenplum.h"
+
 static void check_data_dir(ClusterInfo *cluster);
 static void check_bin_dir(ClusterInfo *cluster);
 static void get_bin_version(ClusterInfo *cluster);
@@ -256,8 +258,12 @@ verify_directories(void)
 
 	check_bin_dir(&old_cluster);
 	check_data_dir(&old_cluster);
-	check_bin_dir(&new_cluster);
-	check_data_dir(&new_cluster);
+
+	if(!is_skip_target_check())
+	{
+	  check_bin_dir(&new_cluster);
+	  check_data_dir(&new_cluster);
+	}
 }
 
 
@@ -339,13 +345,13 @@ check_data_dir(ClusterInfo *cluster)
 	check_single_dir(pg_data, "pg_twophase");
 
 	/* pg_xlog has been renamed to pg_wal in v10 */
-	if (GET_MAJOR_VERSION(cluster->major_version) < 1000)
+	if (GET_MAJOR_VERSION(cluster->major_version) <= 906)
 		check_single_dir(pg_data, "pg_xlog");
 	else
 		check_single_dir(pg_data, "pg_wal");
 
 	/* pg_clog has been renamed to pg_xact in v10 */
-	if (GET_MAJOR_VERSION(cluster->major_version) < 1000)
+	if (GET_MAJOR_VERSION(cluster->major_version) <= 906)
 		check_single_dir(pg_data, "pg_clog");
 	else
 		check_single_dir(pg_data, "pg_xact");
@@ -384,7 +390,7 @@ check_bin_dir(ClusterInfo *cluster)
 	get_bin_version(cluster);
 
 	/* pg_resetxlog has been renamed to pg_resetwal in version 10 */
-	if (GET_MAJOR_VERSION(cluster->bin_version) < 1000)
+	if (GET_MAJOR_VERSION(cluster->bin_version) <= 906)
 		validate_exec(cluster->bindir, "pg_resetxlog");
 	else
 		validate_exec(cluster->bindir, "pg_resetwal");

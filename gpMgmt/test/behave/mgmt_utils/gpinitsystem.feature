@@ -17,6 +17,55 @@ Feature: gpinitsystem tests
         And gpconfig should print "Coordinator value: off" to stdout
         And gpconfig should print "Segment     value: off" to stdout
 
+    Scenario: gpinitsystem should import the system collations
+        Given the database is not running
+        And create demo cluster config
+        When the user runs command "gpinitsystem -a -c ../gpAux/gpdemo/clusterConfigFile"
+        Then gpinitsystem should return a return code of 0
+        And the user runs "psql postgres -c "create table collationimport1 as select * from pg_collation where collnamespace = 'pg_catalog'::regnamespace""
+        # no more collation is imported
+        When the user runs "psql postgres -c "select pg_import_system_collations('pg_catalog')""
+        Then psql should return a return code of 0
+        And psql should print "0" to stdout
+        And psql should print "(1 row)" to stdout
+        And the user runs "psql postgres -c "create table collationimport2 as select * from pg_collation where collnamespace = 'pg_catalog'::regnamespace""
+        # no difference is before import and after import
+        When the user runs "psql postgres -c "select * from collationimport1 except select * from collationimport2""
+        Then psql should return a return code of 0
+        And psql should print "(0 rows)" to stdout
+
+    Scenario: gpinitsystem creates a cluster when the user set LC_ALL env variable
+        Given create demo cluster config
+        And the environment variable "LC_ALL" is set to "en_US.UTF-8"
+        When the user runs command "gpinitsystem -a -c ../gpAux/gpdemo/clusterConfigFile"
+        Then gpinitsystem should return a return code of 0
+        Given the user runs "gpstate"
+        Then gpstate should return a return code of 0
+        And "LC_ALL" environment variable should be restored
+
+    Scenario: gpinitsystem creates a cluster when the user set -n or --locale parameter
+        Given create demo cluster config
+        When the user runs command "gpinitsystem -a -c ../gpAux/gpdemo/clusterConfigFile -n en_US.UTF-8"
+        Then gpinitsystem should return a return code of 0
+        Given the user runs "gpstate"
+        Then gpstate should return a return code of 0
+
+	Scenario: gpinitsystem exits with status 0 when the user set locale variables
+        Given create demo cluster config
+        And the environment variable "LC_MONETARY" is set to "en_US.UTF-8"
+        When the user runs command "gpinitsystem -a -c ../gpAux/gpdemo/clusterConfigFile"
+        Then gpinitsystem should return a return code of 0
+        Given the user runs "gpstate"
+        Then gpstate should return a return code of 0
+        And "LC_MONETARY" environment variable should be restored
+
+    Scenario: gpinitsystem exits with status 0 when the user set locale parameters
+        Given create demo cluster config
+        When the user runs command "gpinitsystem -a -c ../gpAux/gpdemo/clusterConfigFile --lc-monetary=en_US.UTF-8"
+        Then gpinitsystem should return a return code of 0
+        Given the user runs "gpstate"
+        Then gpstate should return a return code of 0
+
     Scenario: gpinitsystem exits with status 1 when the user enters nothing for the confirmation
         Given create demo cluster config
          When the user runs command "echo '' | gpinitsystem -c ../gpAux/gpdemo/clusterConfigFile" eok
@@ -183,6 +232,7 @@ Feature: gpinitsystem tests
         And the database timezone matches "HST"
         And the startup timezone is saved
         And the startup timezone matches "HST"
+        And "TZ" environment variable should be restored
 
     Scenario: gpinitsystem should print FQDN in pg_hba.conf when HBA_HOSTNAMES=1
         Given the cluster config is generated with HBA_HOSTNAMES "1"
@@ -223,7 +273,7 @@ Feature: gpinitsystem tests
         When the user runs command "source $GPHOME/greenplum_path.sh; __DCA_VERSION_FILE__=/tmp/gpinitsystem/gpdb-appliance-version $GPHOME/bin/gpinitsystem -a -c ../gpAux/gpdemo/clusterConfigFile"
         Then gpinitsystem should return a return code of 0
         # the log file must have the entry indicating that DCA specific configuration has been set
-        And the user runs command "egrep 'Setting DCA specific configuration values' ~/gpAdminLogs/gpinitsystem*log"
+        And the user runs command "grep -E 'Setting DCA specific configuration values' ~/gpAdminLogs/gpinitsystem*log"
 
     Scenario: gpinitsystem uses the system locale if no locale is specified
         Given the database is not running
@@ -254,3 +304,65 @@ Feature: gpinitsystem tests
         And the database locales "lc_collate" match the locale "C"
         And the database locales "lc_ctype" match the installed UTF locale
         And the database locales "lc_messages,lc_monetary,lc_numeric,lc_time" match the system locale
+        And "LC_COLLATE" environment variable should be restored
+        And "LC_CTYPE" environment variable should be restored
+
+    @backup_restore_bashrc
+    Scenario: gpinitsystem succeeds if there is banner on host
+        Given the database is not running
+        When the user sets banner on host
+        And a demo cluster is created using gpinitsystem args " "
+        And gpinitsystem should return a return code of 0
+
+    @backup_restore_bashrc
+    Scenario: gpinitsystem succeeds if there is multi-line banner on host
+        Given the database is not running
+        When the user sets multi-line banner on host
+        And a demo cluster is created using gpinitsystem args " "
+        And gpinitsystem should return a return code of 0
+
+    Scenario: gpinitsystem should create consistent port entry on segments postgresql.conf file
+        Given the database is not running
+        When a demo cluster is created using gpinitsystem args " "
+        And gpinitsystem should return a return code of 0
+        Then gpstate should return a return code of 0
+        And check segment conf: postgresql.conf
+
+    Scenario: gpinitsystem creates a cluster successfully when run with -D option
+        Given create demo cluster config
+        When the user runs command "gpinitsystem -a -c ../gpAux/gpdemo/clusterConfigFile -D"
+        Then gpinitsystem should return a return code of 0
+        And gpinitsystem should not print "Start Function REMOTE_EXECUTE_AND_GET_OUTPUT" to stdout
+        And gpinitsystem should not print "End Function REMOTE_EXECUTE_AND_GET_OUTPUT" to stdout
+
+     Scenario: gpinitsystem creates a cluster with for multi-nic setup and populates table entries correctly
+         Given the database is not running
+         And create demo cluster config
+         #Create hosts file with new host-name
+         And backup /etc/hosts file and update hostname entry for localhost
+         And update hostlist file with updated host-address
+         And update clusterConfig file with new port and host-address
+         And update the private keys for the new host address
+         When the user runs "gpinitsystem -a -c /tmp/clusterConfigFile-1 -h /tmp/hostfile--1"
+         Then gpinitsystem should return a return code of 0
+         #Verify entries in the gp_segment_configuration as expected
+         And verify that cluster config has host-name populated correctly
+         #restore hosts file, cleanup of hostlist, config file
+         And restore /etc/hosts file and cleanup hostlist file
+
+    Scenario: gpinitsystem should pass the default value of trusted_shell properly to gpcreateseg
+        Given create demo cluster config
+        When the user runs command "gpinitsystem -a -c ../gpAux/gpdemo/clusterConfigFile -h ../gpAux/gpdemo/hostfile --ignore-warnings"
+        Then gpinitsystem should return a return code of 0
+        When the user runs command "grep -q '.*gpcreateseg\.sh.*Completed .*lalshell.*' ~/gpAdminLogs/gpinitsystem*log"
+        Then grep should return a return code of 0
+
+    Scenario: gpinitsystem should pass the changed value of trusted_shell properly to gpcreateseg
+        Given create demo cluster config
+        And the user runs command "sed -i.bak -E 's/TRUSTED_SHELL=.*/TRUSTED_SHELL=ssh/g' ../gpAux/gpdemo/clusterConfigFile"
+        When the user runs command "gpinitsystem -a -c ../gpAux/gpdemo/clusterConfigFile -h ../gpAux/gpdemo/hostfile"
+        Then gpinitsystem should return a return code of 0
+        When the user runs command "grep -q '.*gpcreateseg\.sh.*Completed ssh.*' ~/gpAdminLogs/gpinitsystem*log"
+        Then grep should return a return code of 0
+        And the user runs command "mv ../gpAux/gpdemo/clusterConfigFile.bak ../gpAux/gpdemo/clusterConfigFile"
+

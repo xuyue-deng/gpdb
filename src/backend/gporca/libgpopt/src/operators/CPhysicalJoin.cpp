@@ -294,7 +294,9 @@ CPhysicalJoin::Ped(CMemoryPool *mp, CExpressionHandle &exprhdl,
 				CPhysicalJoin::PedInnerHashedFromOuterHashed(
 					mp, exprhdl, dmatch, (*pdrgpdpCtxt)[0]);
 			if (pEnfdHashedDistribution)
+			{
 				return pEnfdHashedDistribution;
+			}
 		}
 
 
@@ -346,8 +348,22 @@ CPhysicalJoin::PedInnerHashedFromOuterHashed(
 			{
 				IMDId *pmdidTypeInner =
 					CScalar::PopConvert(pexprMatching->Pop())->MdidType();
-				CMDAccessor *md_accessor = COptCtxt::PoctxtFromTLS()->Pmda();
-				if (md_accessor->RetrieveType(pmdidTypeInner)->IsHashable())
+
+				IMDId *pmdidTypeOuter =
+					CScalar::PopConvert(pexpr->Pop())->MdidType();
+
+				CMDAccessor *mdAccessor = COptCtxt::PoctxtFromTLS()->Pmda();
+
+				IMDId *mdidOpfamilyInner =
+					mdAccessor->RetrieveType(pmdidTypeInner)
+						->GetDistrOpfamilyMdid();
+
+				IMDId *mdidOpfamilyOuter =
+					mdAccessor->RetrieveType(pmdidTypeOuter)
+						->GetDistrOpfamilyMdid();
+
+				if (mdidOpfamilyOuter->Equals(mdidOpfamilyInner) &&
+					mdAccessor->RetrieveType(pmdidTypeInner)->IsHashable())
 				{
 					pexprMatching->AddRef();
 					pdrgpexprMatching->Append(pexprMatching);
@@ -404,6 +420,7 @@ CPhysicalJoin::PdsDerive(CMemoryPool *mp, CExpressionHandle &exprhdl) const
 	CDistributionSpec *pds;
 
 	if (CDistributionSpec::EdtStrictReplicated == pdsOuter->Edt() ||
+		CDistributionSpec::EdtTaintedReplicated == pdsOuter->Edt() ||
 		CDistributionSpec::EdtUniversal == pdsOuter->Edt())
 	{
 		// if outer is replicated/universal, return inner distribution
@@ -425,9 +442,15 @@ CPhysicalJoin::PdsDerive(CMemoryPool *mp, CExpressionHandle &exprhdl) const
 		if (!pdsHashed->HasCompleteEquivSpec(mp))
 		{
 			CExpressionArray *pdrgpexpr = pdsHashed->Pdrgpexpr();
+			IMdIdArray *opfamilies = pdsHashed->Opfamilies();
+
+			if (nullptr != opfamilies)
+			{
+				opfamilies->AddRef();
+			}
 			pdrgpexpr->AddRef();
 			return GPOS_NEW(mp) CDistributionSpecHashed(
-				pdrgpexpr, pdsHashed->FNullsColocated());
+				pdrgpexpr, pdsHashed->FNullsColocated(), opfamilies);
 		}
 	}
 
@@ -610,6 +633,20 @@ CPhysicalJoin::FHashJoinCompatible(
 		nullptr == scop->HashOpfamilyMdid())
 	{
 		return false;
+	}
+
+	// This check is mainly added for RANGE TYPES; RANGE's are treated as
+	// containers and whether a range type can support hashing is decided
+	// based on hashing support of its subtype
+	if (COperator::EopScalarCast == pexprPredOuter->Pop()->Eopid())
+	{
+		pmdidTypeOuter =
+			CScalar::PopConvert((*pexprPredOuter)[0]->Pop())->MdidType();
+	}
+	if (COperator::EopScalarCast == pexprPredInner->Pop()->Eopid())
+	{
+		pmdidTypeInner =
+			CScalar::PopConvert((*pexprPredInner)[0]->Pop())->MdidType();
 	}
 
 	if (md_accessor->RetrieveType(pmdidTypeOuter)->IsHashable() &&

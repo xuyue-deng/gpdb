@@ -19,7 +19,7 @@
 #include "cdb/cdbtm.h"
 #include "utils/resowner.h"
 
-#define CDB_MOTION_LOST_CONTACT_STRING "Interconnect error master lost contact with segment."
+#define CDB_MOTION_LOST_CONTACT_STRING "Interconnect error coordinator lost contact with segment."
 
 struct CdbDispatchResults; /* #include "cdb/cdbdispatchresult.h" */
 struct CdbPgResults;
@@ -56,7 +56,7 @@ typedef struct CdbDispatcherState
 typedef struct DispatcherInternalFuncs
 {
 	bool (*checkForCancel)(struct CdbDispatcherState *ds);
-	int (*getWaitSocketFd)(struct CdbDispatcherState *ds);
+	int* (*getWaitSocketFds)(struct CdbDispatcherState *ds, int *nsocks);
 	void* (*makeDispatchParams)(int maxSlices, int largestGangSize, char *queryText, int queryTextLen);
 	bool (*checkAckMessage)(struct CdbDispatcherState *ds, const char* message, int timeout_sec);
 	void (*checkResults)(struct CdbDispatcherState *ds, DispatchWaitMode waitMode);
@@ -128,10 +128,11 @@ cdbdisp_waitDispatchFinish(struct CdbDispatcherState *ds);
  * know if QEs run as expected.
  *
  * message: specifies the expected ACK message to check.
- * wait: if true, this function will wait until required ACK messages
- *       have been received from required QEs.
+ * timeout_sec: the second that the dispatcher waits for the ack messages at most.
+ *       0 means checking immediately, and -1 means waiting until all ack
+ *       messages are received.
  *
- * QEs should call cdbdisp_sendAckMessageToQD to send acknowledge messages to QD.
+ * QEs should call EndpointNotifyQD to send acknowledge messages to QD.
  */
 bool
 cdbdisp_checkDispatchAckMessage(struct CdbDispatcherState *ds, const char *message,
@@ -195,13 +196,6 @@ CdbDispatcherState * cdbdisp_makeDispatcherState(bool isExtendedQuery);
  */
 void cdbdisp_destroyDispatcherState(CdbDispatcherState *ds);
 
-/*
- * cdbdisp_sendAckMessageToQD - send acknowledge message to QD (runs on QE).
- *
- * QD uses cdbdisp_checkDispatchAckMessage() to wait QE acknowledge message.
- */
-void cdbdisp_sendAckMessageToQD(const char *message);
-
 void
 cdbdisp_makeDispatchParams(CdbDispatcherState *ds,
 						   int maxSlices,
@@ -209,7 +203,7 @@ cdbdisp_makeDispatchParams(CdbDispatcherState *ds,
 						   int queryTextLen);
 
 bool cdbdisp_checkForCancel(CdbDispatcherState * ds);
-int cdbdisp_getWaitSocketFd(CdbDispatcherState *ds);
+int *cdbdisp_getWaitSocketFds(CdbDispatcherState *ds, int *nsocks);
 
 void cdbdisp_cleanupDispatcherHandle(const struct ResourceOwnerData * owner);
 

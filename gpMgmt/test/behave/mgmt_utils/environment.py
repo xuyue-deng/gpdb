@@ -9,6 +9,7 @@ from test.behave_utils.utils import drop_database_if_exists, start_database_if_n
 from steps.mirrors_mgmt_utils import MirrorMgmtContext
 from steps.gpconfig_mgmt_utils import GpConfigContext
 from steps.gpssh_exkeys_mgmt_utils import GpsshExkeysMgmtContext
+from steps.mgmt_utils import backup_bashrc, restore_bashrc
 from gppylib.db import dbconn
 
 def before_all(context):
@@ -69,11 +70,6 @@ def before_feature(context, feature):
         dbconn.execSQL(context.conn, 'insert into t3 values(1, 4)')
         context.conn.commit()
 
-    if 'gppkg' in feature.tags:
-        run_command(context, 'bash demo/gppkg/generate_sample_gppkg.sh buildGppkg')
-        run_command(context, 'cp -f /tmp/sample-gppkg/sample.gppkg test/behave/mgmt_utils/steps/data/')
-
-
 def after_feature(context, feature):
     if 'analyzedb' in feature.tags:
         context.conn.close()
@@ -87,7 +83,6 @@ def after_feature(context, feature):
             And gpstop should return a return code of 0
             ''')
 
-
 def before_scenario(context, scenario):
     if "skip" in scenario.effective_tags:
         scenario.skip("skipping scenario tagged with @skip")
@@ -96,7 +91,13 @@ def before_scenario(context, scenario):
     if 'gpmovemirrors' in context.feature.tags:
         context.mirror_context = MirrorMgmtContext()
 
+    if 'gpaddmirrors' in context.feature.tags:
+        context.mirror_context = MirrorMgmtContext()
+
     if 'gprecoverseg' in context.feature.tags:
+        context.mirror_context = MirrorMgmtContext()
+
+    if 'gprecoverseg_newhost' in context.feature.tags:
         context.mirror_context = MirrorMgmtContext()
 
     if 'gpconfig' in context.feature.tags:
@@ -113,7 +114,8 @@ def before_scenario(context, scenario):
     if 'analyzedb' not in context.feature.tags:
         start_database_if_not_started(context)
         drop_database_if_exists(context, 'testdb')
-
+    if 'gp_bash_functions.sh' in context.feature.tags or 'backup_restore_bashrc' in scenario.effective_tags:
+        backup_bashrc()
 
 def after_scenario(context, scenario):
     #TODO: you'd think that the scenario.skip() in before_scenario() would
@@ -132,6 +134,9 @@ def after_scenario(context, scenario):
             And gpstart should return a return code of 0
             ''')
 
+    if 'gp_bash_functions.sh' in context.feature.tags or 'backup_restore_bashrc' in scenario.effective_tags:
+        restore_bashrc()
+
     # NOTE: gpconfig after_scenario cleanup is in the step `the gpconfig context is setup`
     tags_to_skip = ['gpexpand', 'gpaddmirrors', 'gpinitstandby',
                     'gpconfig', 'gpstop', 'gpinitsystem', 'cross_subnet']
@@ -139,8 +144,9 @@ def after_scenario(context, scenario):
         return
 
     tags_to_cleanup = ['gpmovemirrors', 'gpssh-exkeys']
-    if set(context.feature.tags).intersection(tags_to_cleanup):
-        if 'temp_base_dir' in context:
+    if set(context.feature.tags).intersection(tags_to_cleanup) and "skip_cleanup" not in scenario.effective_tags:
+        if 'temp_base_dir' in context and os.path.exists(context.temp_base_dir):
+            os.chmod(context.temp_base_dir, 0o700)
             shutil.rmtree(context.temp_base_dir)
 
     tags_to_not_restart_db = ['analyzedb', 'gpssh-exkeys']
@@ -174,3 +180,6 @@ def after_scenario(context, scenario):
         execute_sql('postgres', create_fault_query)
         reset_fault_query = "SELECT gp_inject_fault_infinite('all', 'reset', dbid) FROM gp_segment_configuration WHERE status='u';"
         execute_sql('postgres', reset_fault_query)
+
+    if os.getenv('SUSPEND_PG_REWIND') is not None:
+        del os.environ['SUSPEND_PG_REWIND']

@@ -30,6 +30,7 @@
 #include "catalog/pg_type.h"
 #include "cdb/cdbgang.h"
 #include "cdb/cdbvars.h"
+#include "common/hashfn.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -170,13 +171,16 @@ ResLockAcquire(LOCKTAG *locktag, ResPortalIncrement *incrementSet)
 		locallock->lock = NULL;
 		locallock->proclock = NULL;
 		locallock->hashcode = LockTagHashCode(&(localtag.lock));
-		locallock->istemptable = false;
+
+		/* must remain 0 for the entire lifecycle of the LOCALLOCK */
 		locallock->nLocks = 0;
 		locallock->numLockOwners = 0;
-		locallock->maxLockOwners = 8;
+
+		/* initialized but unused for the entire lifecycle of the LOCALLOCK */
+		locallock->istemptable = false;
 		locallock->holdsStrongLockCount = false;
 		locallock->lockCleared = false;
-		locallock->lockOwners = NULL;
+		locallock->maxLockOwners = 8;
 		locallock->lockOwners = (LOCALLOCKOWNER *)
 			MemoryContextAlloc(TopMemoryContext, locallock->maxLockOwners * sizeof(LOCALLOCKOWNER));
 	}
@@ -339,7 +343,11 @@ ResLockAcquire(LOCKTAG *locktag, ResPortalIncrement *incrementSet)
 		lock->requested[lockmode]--;
 		Assert((lock->nRequested >= 0) && (lock->requested[lockmode] >= 0));
 
-		/* Clean up this lock. */
+		/*
+		 * Clean up the locallock. Since a single locallock can represent
+		 * multiple locked portals in the same backend, we can only remove it if
+		 * this is the last portal.
+		 */
 		if (proclock->nLocks == 0)
 			RemoveLocalLock(locallock);
 
@@ -401,7 +409,11 @@ ResLockAcquire(LOCKTAG *locktag, ResPortalIncrement *incrementSet)
 		lock->requested[lockmode]--;
 		Assert((lock->nRequested >= 0) && (lock->requested[lockmode] >= 0));
 
-		/* Clean up this lock. */
+		/*
+		 * Clean up the locallock. Since a single locallock can represent
+		 * multiple locked portals in the same backend, we can only remove it if
+		 * this is the last portal.
+		 */
 		if (proclock->nLocks == 0)
 			RemoveLocalLock(locallock);
 
@@ -601,6 +613,11 @@ ResLockRelease(LOCKTAG *locktag, uint32 resPortalId)
 	if (!incrementSet)
 	{
 		elog(DEBUG1, "Resource queue %d: increment not found on unlock", locktag->locktag_field1);
+		/*
+		 * Clean up the locallock. Since a single locallock can represent
+		 * multiple locked portals in the same backend, we can only remove it if
+		 * this is the last portal.
+		 */
 		if (proclock->nLocks == 0)
 		{
 			RemoveLocalLock(locallock);
@@ -620,6 +637,10 @@ ResLockRelease(LOCKTAG *locktag, uint32 resPortalId)
 
 	/*
 	 * Perform clean-up, waking up any waiters!
+	 *
+	 * Clean up the locallock. Since a single locallock can represent
+	 * multiple locked portals in the same backend, we can only remove it if
+	 * this is the last portal.
 	 */
 	if (proclock->nLocks == 0)
 		RemoveLocalLock(locallock);
@@ -1060,21 +1081,23 @@ ResWaitOnLock(LOCALLOCK *locallock, ResourceOwner owner, ResPortalIncrement *inc
 {
 	uint32		hashcode = locallock->hashcode;
 	LWLockId	partitionLock = LockHashPartitionLock(hashcode);
+	char		new_status[160];
 	const char *old_status;
-	char	   *new_status = NULL;
 	int			len;
 
 	/* Report change to waiting status */
 	if (update_process_title)
 	{
+		/* We should avoid using palloc() here */
 		old_status = get_real_act_ps_display(&len);
-		new_status = (char *) palloc(len + 8 + 1);
-		memcpy(new_status, old_status, len);
-		strcpy(new_status + len, " queuing");
-		set_ps_display(new_status, false);		/* truncate off " queuing" */
+		len = Min(len, sizeof(new_status) - 9);
+		snprintf(new_status, sizeof(new_status), "%.*s queuing",
+				 len, old_status);
+		set_ps_display(new_status, false);
+
+		/* Truncate off " queuing" */
 		new_status[len] = '\0';
 	}
-	pgstat_report_wait_start(PG_WAIT_RESOURCE_QUEUE);
 
 	awaitedLock = locallock;
 	awaitedOwner = owner;
@@ -1092,7 +1115,6 @@ ResWaitOnLock(LOCALLOCK *locallock, ResourceOwner owner, ResPortalIncrement *inc
 		LWLockRelease(partitionLock);
 		DeadLockReport();
 	}
-	pgstat_report_wait_end();
 
 	awaitedLock = NULL;
 
@@ -1100,7 +1122,6 @@ ResWaitOnLock(LOCALLOCK *locallock, ResourceOwner owner, ResPortalIncrement *inc
 	if (update_process_title)
 	{
 		set_ps_display(new_status, false);
-		pfree(new_status);
 	}
 
 	return;
@@ -1232,7 +1253,7 @@ ResProcWakeup(PGPROC *proc, int waitStatus)
 	proc->waitStatus = waitStatus;
 
 	/* And awaken it */
-	PGSemaphoreUnlock(proc->sem);
+	SetLatch(&proc->procLatch);
 
 	return retProc;
 }
@@ -1280,6 +1301,7 @@ ResRemoveFromWaitQueue(PGPROC *proc, uint32 hashcode)
 	/* Clean up the proc's own state */
 	proc->waitLock = NULL;
 	proc->waitProcLock = NULL;
+	proc->waitStatus = STATUS_ERROR;
 
 	/*
 	 * Remove the waited on portal increment.

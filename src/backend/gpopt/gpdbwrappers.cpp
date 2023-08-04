@@ -22,6 +22,8 @@
 
 #include "gpopt/gpdbwrappers.h"
 
+#include <limits>  // std::numeric_limits
+
 #include "gpos/base.h"
 #include "gpos/error/CAutoExceptionStack.h"
 #include "gpos/error/CException.h"
@@ -33,6 +35,7 @@
 extern "C" {
 #include "access/external.h"
 #include "catalog/pg_inherits.h"
+#include "foreign/fdwapi.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
@@ -466,14 +469,12 @@ gpdb::TypeCollation(Oid type)
 	{
 		Oid collation = InvalidOid;
 		Oid typcollation = get_typcollation(type);
-		// GPDB_12_MERGE_FIXME: brittle assumption: we only let in NAME,
-		// default-collated non-name, or non-collatable expressions
-		// This and a lot of other hacks can go away if only collation on
-		// expressions just roundtrips through ORCA
 		if (OidIsValid(typcollation))
 		{
 			if (type == NAMEOID)
+			{
 				return typcollation;  // As of v12, this is C_COLLATION_OID
+			}
 			return DEFAULT_COLLATION_OID;
 		}
 		return collation;
@@ -594,18 +595,6 @@ gpdb::FuncStability(Oid funcid)
 }
 
 char
-gpdb::FuncDataAccess(Oid funcid)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_proc */
-		return func_data_access(funcid);
-	}
-	GP_WRAP_END;
-	return '\0';
-}
-
-char
 gpdb::FuncExecLocation(Oid funcid)
 {
 	GP_WRAP_START;
@@ -690,6 +679,18 @@ gpdb::IsOrderedAgg(Oid aggid)
 }
 
 bool
+gpdb::IsRepSafeAgg(Oid aggid)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_aggregate */
+		return is_agg_repsafe(aggid);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+bool
 gpdb::IsAggPartialCapable(Oid aggid)
 {
 	GP_WRAP_START;
@@ -749,6 +750,52 @@ gpdb::GetAttStats(Oid relid, AttrNumber attnum)
 	return nullptr;
 }
 
+int32
+gpdb::GetAttAvgWidth(Oid relid, AttrNumber attnum)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_statistic */
+		return get_attavgwidth(relid, attnum);
+	}
+	GP_WRAP_END;
+	return 0;
+}
+
+List *
+gpdb::GetExtStats(Relation rel)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_statistic_ext */
+		return GetRelationExtStatistics(rel);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+char *
+gpdb::GetExtStatsName(Oid statOid)
+{
+	GP_WRAP_START;
+	{
+		return GetExtStatisticsName(statOid);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+List *
+gpdb::GetExtStatsKinds(Oid statOid)
+{
+	GP_WRAP_START;
+	{
+		return GetExtStatisticsKinds(statOid);
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
 Oid
 gpdb::GetCommutatorOp(Oid opno)
 {
@@ -759,18 +806,6 @@ gpdb::GetCommutatorOp(Oid opno)
 	}
 	GP_WRAP_END;
 	return 0;
-}
-
-bool
-gpdb::CheckConstraintExists(Oid check_constraint_oid)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_constraint */
-		return check_constraint_exists(check_constraint_oid);
-	}
-	GP_WRAP_END;
-	return false;
 }
 
 char *
@@ -836,54 +871,6 @@ gpdb::GetRelationPartConstraints(Relation rel)
 	GP_WRAP_END;
 	return nullptr;
 }
-
-#if 0
-bool
-gpdb::HasExternalPartition
-	(
-	Oid oid
-	)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_partition, pg_partition_rule */
-		return rel_has_external_partition(oid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-
-
-bool
-gpdb::IsLeafPartition
-	(
-	Oid oid
-	)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_partition, pg_partition_rule */
-		return rel_is_leaf_partition(oid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-
-Oid
-gpdb::GetRootPartition
-	(
-	Oid oid
-	)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_partition, pg_partition_rule */
-		return rel_partition_get_master(oid);
-	}
-	GP_WRAP_END;
-	return InvalidOid;
-}
-#endif
 
 bool
 gpdb::GetCastFunc(Oid src_oid, Oid dest_oid, bool *is_binary_coercible,
@@ -1062,58 +1049,6 @@ gpdb::GetOpName(Oid opno)
 	GP_WRAP_END;
 	return nullptr;
 }
-#if 0
-List *
-gpdb::GetPartitionAttrs
-	(
-	Oid oid
-	)
-{
-	GP_WRAP_START;
-	{
-		// return unique partition level attributes
-		/* catalog tables: pg_partition */
-		return rel_partition_keys_ordered(oid);
-	}
-	GP_WRAP_END;
-	return NIL;
-}
-
-void
-gpdb::GetOrderedPartKeysAndKinds
-	(
-	Oid oid,
-	List **pkeys,
-	List **pkinds
-	)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_partition */
-		rel_partition_keys_kinds_ordered(oid, pkeys, pkinds);
-	}
-	GP_WRAP_END;
-}
-
-PartitionNode *
-gpdb::GetParts
-	(
-	Oid relid,
-	int16 level,
-	Oid parent,
-	bool inctemplate,
-	bool includesubparts
-	)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_partition, pg_partition_rule */
-		return get_parts(relid, level, parent, inctemplate, includesubparts);
-	}
-	GP_WRAP_END;
-	return NULL;
-}
-#endif
 
 List *
 gpdb::GetRelationKeys(Oid relid)
@@ -1184,18 +1119,6 @@ gpdb::FreeHeapTuple(HeapTuple htup)
 	GP_WRAP_END;
 }
 
-bool
-gpdb::IndexExists(Oid oid)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_index */
-		return index_exists(oid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-
 Oid
 gpdb::GetDefaultDistributionOpclassForType(Oid typid)
 {
@@ -1227,6 +1150,18 @@ gpdb::GetDefaultDistributionOpfamilyForType(Oid typid)
 	{
 		/* catalog tables: pg_type, pg_opclass */
 		return cdb_default_distribution_opfamily_for_type(typid);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+Oid
+gpdb::GetDefaultPartitionOpfamilyForType(Oid typid)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_type, pg_opclass */
+		return default_partition_opfamily_for_type(typid);
 	}
 	GP_WRAP_END;
 	return false;
@@ -1463,36 +1398,6 @@ gpdb::ListFreeDeep(List *list)
 	}
 	GP_WRAP_END;
 }
-#if 0
-bool
-gpdb::IsAppendOnlyPartitionTable
-	(
-	Oid root_oid
-	)
-{
-	GP_WRAP_START;
-	{
-		return rel_has_appendonly_partition(root_oid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-
-bool
-gpdb::IsMultilevelPartitionUniform
-	(
-	Oid root_oid
-	)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_partition, pg_partition_rule, pg_constraint */
-		return rel_partitioning_is_uniform(root_oid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-#endif
 
 TypeCacheEntry *
 gpdb::LookupTypeCache(Oid type_id, int flags)
@@ -1661,7 +1566,9 @@ gpdb::GpdbEreportImpl(int xerrcode, int severitylevel, const char *xerrmsg,
 			errcode(xerrcode);
 			errmsg("%s", xerrmsg);
 			if (xerrhint)
+			{
 				errhint("%s", xerrhint);
+			}
 			errfinish(filename, lineno, funcname);
 		}
 	}
@@ -1813,18 +1720,6 @@ gpdb::GetOpInputTypes(Oid opno, Oid *lefttype, Oid *righttype)
 	GP_WRAP_END;
 }
 
-bool
-gpdb::OperatorExists(Oid oid)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_operator */
-		return operator_exists(oid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-
 void *
 gpdb::GPDBAlloc(Size size)
 {
@@ -1883,45 +1778,6 @@ gpdb::MutateQueryTree(Query *query, Node *(*mutator)(), void *context,
 	return nullptr;
 }
 
-#if 0
-bool
-gpdb::RelPartIsRoot
-	(
-	Oid relid
-	)
-{
-	GP_WRAP_START;
-	{
-		return PART_STATUS_ROOT == rel_part_status(relid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-
-bool
-gpdb::RelPartIsInterior
-	(
-	Oid relid
-	)
-{
-	GP_WRAP_START;
-	{
-		return PART_STATUS_INTERIOR == rel_part_status(relid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-#endif
-
-bool
-gpdb::RelPartIsNone(Oid relid)
-{
-	// FIXME: this is left unused for now. But when it's used, we also need to
-	// check for whether relid is a partition of another table
-	pg_unreachable();
-	return !RelIsPartitioned(relid);
-}
-
 bool
 gpdb::HasSubclassSlow(Oid rel_oid)
 {
@@ -1934,22 +1790,22 @@ gpdb::HasSubclassSlow(Oid rel_oid)
 	return false;
 }
 
-bool
-gpdb::RelIsExternalTable(Oid relid)
-{
-	GP_WRAP_START;
-	{
-		return rel_is_external_table(relid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-
 GpPolicy *
 gpdb::GetDistributionPolicy(Relation rel)
 {
 	GP_WRAP_START;
 	{
+		// external tables are a special case, and we need to manually build
+		// the GpPolicy struct which contains the external table's distribution
+		if (rel_is_external_table(rel->rd_id))
+		{
+			return GpPolicyFetch(rel->rd_id);
+		}
+		// we determine the distribution at a later point for foreign tables
+		else if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+		{
+			return nullptr;
+		}
 		/* catalog tables: pg_class */
 		return relation_policy(rel);
 	}
@@ -1969,38 +1825,22 @@ gpdb::IsChildPartDistributionMismatched(Relation rel)
 	return false;
 }
 
-bool
-gpdb::RelationExists(Oid oid)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_class */
-		return relation_exists(oid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-
-void
-gpdb::CdbEstimateRelationSize(RelOptInfo *relOptInfo, Relation rel,
-							  int32 *attr_widths, BlockNumber *pages,
-							  double *tuples, double *allvisfrac)
-{
-	GP_WRAP_START;
-	{
-		cdb_estimate_rel_size(relOptInfo, rel, attr_widths, pages, tuples,
-							  allvisfrac);
-		return;
-	}
-	GP_WRAP_END;
-}
-
 double
 gpdb::CdbEstimatePartitionedNumTuples(Relation rel)
 {
 	GP_WRAP_START;
 	{
 		return cdb_estimate_partitioned_numtuples(rel);
+	}
+	GP_WRAP_END;
+}
+
+PageEstimate
+gpdb::CdbEstimatePartitionedNumPages(Relation rel)
+{
+	GP_WRAP_START;
+	{
+		return cdb_estimate_partitioned_numpages(rel);
 	}
 	GP_WRAP_END;
 }
@@ -2031,6 +1871,26 @@ gpdb::GetRelationIndexes(Relation relation)
 	return NIL;
 }
 
+MVNDistinct *
+gpdb::GetMVNDistinct(Oid stat_oid)
+{
+	GP_WRAP_START;
+	{
+		return statext_ndistinct_load(stat_oid);
+	}
+	GP_WRAP_END;
+}
+
+MVDependencies *
+gpdb::GetMVDependencies(Oid stat_oid)
+{
+	GP_WRAP_START;
+	{
+		return statext_dependencies_load(stat_oid);
+	}
+	GP_WRAP_END;
+}
+
 gpdb::RelationWrapper
 gpdb::GetRelation(Oid rel_oid)
 {
@@ -2042,32 +1902,19 @@ gpdb::GetRelation(Oid rel_oid)
 	GP_WRAP_END;
 }
 
-ExtTableEntry *
-gpdb::GetExternalTableEntry(Oid rel_oid)
-{
-	GP_WRAP_START;
-	{
-		return GetExtTableEntry(rel_oid);
-	}
-	GP_WRAP_END;
-	return nullptr;
-}
-
-
 ForeignScan *
-gpdb::CreateForeignScanForExternalTable(Oid rel_oid, Index scanrelid,
-										List *qual, List *targetlist)
+gpdb::CreateForeignScan(Oid rel_oid, Index scanrelid, List *qual,
+						List *targetlist, Query *query, RangeTblEntry *rte)
 {
 	GP_WRAP_START;
 	{
-		return BuildForeignScanForExternalTable(rel_oid, scanrelid, qual,
-												targetlist);
+		return BuildForeignScan(rel_oid, scanrelid, qual, targetlist, query,
+								rte);
 	}
 	GP_WRAP_END;
 	return nullptr;
 }
 
-// GPDB_12_MERGE_FIXME: Change signature to take in Expr instead of Node
 TargetEntry *
 gpdb::FindFirstMatchingMemberInTargetList(Node *node, List *targetlist)
 {
@@ -2103,18 +1950,6 @@ gpdb::Equals(void *p1, void *p2)
 }
 
 bool
-gpdb::TypeExists(Oid oid)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_type */
-		return type_exists(oid);
-	}
-	GP_WRAP_END;
-	return false;
-}
-
-bool
 gpdb::IsCompositeType(Oid typid)
 {
 	GP_WRAP_START;
@@ -2140,63 +1975,6 @@ gpdb::IsTextRelatedType(Oid typid)
 	}
 	GP_WRAP_END;
 	return false;
-}
-
-
-int
-gpdb::GetIntFromValue(Node *node)
-{
-	GP_WRAP_START;
-	{
-		return intVal(node);
-	}
-	GP_WRAP_END;
-	return 0;
-}
-
-Uri *
-gpdb::ParseExternalTableUri(const char *uri)
-{
-	GP_WRAP_START;
-	{
-		return ParseExternalTableUri(uri);
-	}
-	GP_WRAP_END;
-	return nullptr;
-}
-
-CdbComponentDatabases *
-gpdb::GetComponentDatabases(void)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: gp_segment_config */
-		return cdbcomponent_getCdbComponents();
-	}
-	GP_WRAP_END;
-	return nullptr;
-}
-
-int
-gpdb::StrCmpIgnoreCase(const char *s1, const char *s2)
-{
-	GP_WRAP_START;
-	{
-		return pg_strcasecmp(s1, s2);
-	}
-	GP_WRAP_END;
-	return 0;
-}
-
-bool *
-gpdb::ConstructRandomSegMap(int total_primaries, int total_to_skip)
-{
-	GP_WRAP_START;
-	{
-		return makeRandomSegMap(total_primaries, total_to_skip);
-	}
-	GP_WRAP_END;
-	return nullptr;
 }
 
 StringInfo
@@ -2320,7 +2098,8 @@ gpdb::HasUpdateTriggers(Oid relid)
 
 // get index op family properties
 void
-gpdb::IndexOpProperties(Oid opno, Oid opfamily, int *strategy, Oid *righttype)
+gpdb::IndexOpProperties(Oid opno, Oid opfamily, StrategyNumber *strategynumber,
+						Oid *righttype)
 {
 	GP_WRAP_START;
 	{
@@ -2329,9 +2108,15 @@ gpdb::IndexOpProperties(Oid opno, Oid opfamily, int *strategy, Oid *righttype)
 		// Only the right type is returned to the caller, the left
 		// type is simply ignored.
 		Oid lefttype;
+		INT strategy;
 
-		get_op_opfamily_properties(opno, opfamily, false, strategy, &lefttype,
+		get_op_opfamily_properties(opno, opfamily, false, &strategy, &lefttype,
 								   righttype);
+
+		// Ensure the value of strategy doesn't get truncated when converted to StrategyNumber
+		GPOS_ASSERT(strategy >= 0 &&
+					strategy <= std::numeric_limits<StrategyNumber>::max());
+		*strategynumber = static_cast<StrategyNumber>(strategy);
 		return;
 	}
 	GP_WRAP_END;
@@ -2408,6 +2193,22 @@ gpdb::GetMergeJoinOpFamilies(Oid opno)
 }
 
 
+// get the OID of base elementtype for a given typid
+// eg.: CREATE DOMAIN text_domain as text;
+// SELECT oid, typbasetype from pg_type where typname = 'text_domain';
+// oid         | XXXXX  --> Oid for text_domain
+// typbasetype | 25     --> Oid for base element ie, TEXT
+Oid
+gpdb::GetBaseType(Oid typid)
+{
+	GP_WRAP_START;
+	{
+		return getBaseType(typid);
+	}
+	GP_WRAP_END;
+	return InvalidOid;
+}
+
 // Evaluates 'expr' and returns the result as an Expr.
 // Caller keeps ownership of 'expr' and takes ownership of the result
 Expr *
@@ -2420,19 +2221,6 @@ gpdb::EvaluateExpr(Expr *expr, Oid result_type, int32 typmod)
 	}
 	GP_WRAP_END;
 	return nullptr;
-}
-
-// interpret the value of "With oids" option from a list of defelems
-// GPDB_12_MERGE_FIXME: this leaves dead code in CMDRelationGPDB
-bool
-gpdb::InterpretOidsOption(List *options, bool allowOids)
-{
-	GP_WRAP_START;
-	{
-		return false;
-	}
-	GP_WRAP_END;
-	return false;
 }
 
 char *
@@ -2467,21 +2255,6 @@ gpdb::EvalConstExpressions(Node *node)
 	GP_WRAP_END;
 	return nullptr;
 }
-#if 0
-SelectedParts *
-gpdb::RunStaticPartitionSelection
-	(
-	PartitionSelector *ps
-	)
-{
-	GP_WRAP_START;
-	{
-		return static_part_selection(ps);
-	}
-	GP_WRAP_END;
-	return NULL;
-}
-#endif
 
 #ifdef FAULT_INJECTOR
 FaultInjectorType_e
@@ -2494,25 +2267,6 @@ gpdb::InjectFaultInOptTasks(const char *fault_name)
 	}
 	GP_WRAP_END;
 	return FaultInjectorTypeNotSpecified;
-}
-#endif
-
-/* GPDB_12_MERGE_FIXME: dead code now? */
-#if 0
-gpos::ULONG
-gpdb::CountLeafPartTables
-       (
-       Oid rel_oid
-       )
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_partition, pg_partition_rules */
-		return countLeafPartTables(rel_oid);
-	}
-	GP_WRAP_END;
-
-	return 0;
 }
 #endif
 
@@ -2563,13 +2317,9 @@ register_mdcache_invalidation_callbacks(void)
 		CONSTROID,		  /* pg_constraint */
 		OPEROID,		  /* pg_operator */
 		OPFAMILYOID,	  /* pg_opfamily */
-#if 0
-		PARTOID,			/* pg_partition */
-		PARTRULEOID,		/* pg_partition_rule */
-#endif
-		STATRELATTINH, /* pg_statistics */
-		TYPEOID,	   /* pg_type */
-		PROCOID,	   /* pg_proc */
+		STATRELATTINH,	  /* pg_statistics */
+		TYPEOID,		  /* pg_type */
+		PROCOID,		  /* pg_proc */
 
 		/*
 		 * lookup_type_cache() will also access pg_opclass, via GetDefaultOpClass(),
@@ -2633,7 +2383,9 @@ gpdb::MDCacheNeedsReset(void)
 			mdcache_invalidation_counter_registered = true;
 		}
 		if (last_mdcache_invalidation_counter == mdcache_invalidation_counter)
+		{
 			return false;
+		}
 		else
 		{
 			last_mdcache_invalidation_counter = mdcache_invalidation_counter;
@@ -2783,26 +2535,6 @@ gpdb::ExpressionReturnsSet(Node *clause)
 	GP_WRAP_END;
 }
 
-bool
-gpdb::RelIsPartitioned(Oid relid)
-{
-	GP_WRAP_START;
-	{
-		return relation_is_partitioned(relid);
-	}
-	GP_WRAP_END;
-}
-
-bool
-gpdb::IndexIsPartitioned(Oid relid)
-{
-	GP_WRAP_START;
-	{
-		return index_is_partitioned(relid);
-	}
-	GP_WRAP_END;
-}
-
 List *
 gpdb::GetRelChildIndexes(Oid reloid)
 {
@@ -2820,16 +2552,140 @@ gpdb::GetRelChildIndexes(Oid reloid)
 	return partoids;
 }
 
+Oid
+gpdb::GetForeignServerId(Oid reloid)
+{
+	GP_WRAP_START;
+	{
+		return GetForeignServerIdByRelId(reloid);
+	}
+	GP_WRAP_END;
+	return 0;
+}
+
+// Locks on partition leafs and indexes are held during optimizer (after
+// parse-analyze stage). ORCA need this function to lock relation. Here
+// we do not need to consider lock-upgrade issue, reasons are:
+//   1. Only UPDATE|DELETE statement may upgrade lock level
+//   2. ORCA currently does not support DML on partition tables
+//   3. If not partition table, then parser should have already locked
+//   4. Even later ORCA support DML on partition tables, the lock mode
+//      of leafs should be the same as the mode in root's RTE's rellockmode
+//   5. Index does not have lock-upgrade problem.
 void
 gpdb::GPDBLockRelationOid(Oid reloid, LOCKMODE lockmode)
 {
 	GP_WRAP_START;
 	{
-		bool lockUpgraded;
-		lockmode = UpgradeRelLockIfNecessary(reloid, lockmode, &lockUpgraded);
 		LockRelationOid(reloid, lockmode);
 	}
 	GP_WRAP_END;
+}
+
+char *
+gpdb::GetRelFdwName(Oid reloid)
+{
+	GP_WRAP_START;
+	{
+		Oid fs_id = GetForeignServerIdByRelId(reloid);
+		ForeignServer *fs = GetForeignServer(fs_id);
+		ForeignDataWrapper *fdw = GetForeignDataWrapper(fs->fdwid);
+		return fdw->fdwname;
+	}
+	GP_WRAP_END;
+	return nullptr;
+}
+
+PathTarget *
+gpdb::MakePathtargetFromTlist(List *tlist)
+{
+	GP_WRAP_START;
+	{
+		return make_pathtarget_from_tlist(tlist);
+	}
+	GP_WRAP_END;
+}
+
+void
+gpdb::SplitPathtargetAtSrfs(PlannerInfo *root, PathTarget *target,
+							PathTarget *input_target, List **targets,
+							List **targets_contain_srfs)
+{
+	GP_WRAP_START;
+	{
+		split_pathtarget_at_srfs(root, target, input_target, targets,
+								 targets_contain_srfs);
+	}
+	GP_WRAP_END;
+}
+
+List *
+gpdb::MakeTlistFromPathtarget(PathTarget *target)
+{
+	GP_WRAP_START;
+	{
+		return make_tlist_from_pathtarget(target);
+	}
+	GP_WRAP_END;
+	return NIL;
+}
+
+Node *
+gpdb::Expression_tree_mutator(Node *node, Node *(*mutator)(), void *context)
+{
+	GP_WRAP_START;
+	{
+		return expression_tree_mutator(node, mutator, context);
+	}
+	GP_WRAP_END;
+
+	return nullptr;
+}
+
+TargetEntry *
+gpdb::TlistMember(Expr *node, List *targetlist)
+{
+	GP_WRAP_START;
+	{
+		return tlist_member(node, targetlist);
+	}
+	GP_WRAP_END;
+
+	return nullptr;
+}
+
+Var *
+gpdb::MakeVarFromTargetEntry(Index varno, TargetEntry *tle)
+{
+	GP_WRAP_START;
+	{
+		return makeVarFromTargetEntry(varno, tle);
+	}
+	GP_WRAP_END;
+}
+
+TargetEntry *
+gpdb::FlatCopyTargetEntry(TargetEntry *src_tle)
+{
+	GP_WRAP_START;
+	{
+		return flatCopyTargetEntry(src_tle);
+	}
+	GP_WRAP_END;
+}
+
+
+// Returns true if type is a RANGE
+// pg_type (typtype = 'r')
+bool
+gpdb::IsTypeRange(Oid typid)
+{
+	GP_WRAP_START;
+	{
+		return type_is_range(typid);
+	}
+	GP_WRAP_END;
+	return false;
 }
 
 // EOF

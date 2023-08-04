@@ -110,7 +110,9 @@ main(int argc, char **argv)
 	get_restricted_token();
 
 	adjust_data_dir(&old_cluster);
-	adjust_data_dir(&new_cluster);
+
+	if(!is_skip_target_check())
+		adjust_data_dir(&new_cluster);
 
 	setup(argv[0], &live_check);
 
@@ -120,16 +122,24 @@ main(int argc, char **argv)
 	check_cluster_versions();
 
 	get_sock_dir(&old_cluster, live_check);
-	get_sock_dir(&new_cluster, false);
 
+	if(!is_skip_target_check())
+		get_sock_dir(&new_cluster, false);
+
+	/* not skipped for is_skip_target_check because of some checks on
+	 * old_cluster are done independently of new_cluster
+	 */
 	check_cluster_compatibility(live_check);
 
 	/* Set mask based on PGDATA permissions */
-	if (!GetDataDirectoryCreatePerm(new_cluster.pgdata))
+	if (!is_skip_target_check())
 	{
-		pg_log(PG_FATAL, "could not read permissions of directory \"%s\": %s\n",
-			   new_cluster.pgdata, strerror(errno));
-		exit(1);
+		if (!GetDataDirectoryCreatePerm(new_cluster.pgdata))
+		{
+			pg_log(PG_FATAL, "could not read permissions of directory \"%s\": %s\n",
+					 new_cluster.pgdata, strerror(errno));
+			exit(1);
+		}
 	}
 
 	umask(pg_mode_mask);
@@ -138,9 +148,13 @@ main(int argc, char **argv)
 
 
 	/* -- NEW -- */
-	start_postmaster(&new_cluster, true);
 
-	check_new_cluster();
+	if(!is_skip_target_check() || !skip_checks())
+	{
+		start_postmaster(&new_cluster, true);
+		check_new_cluster();
+	}
+
 	report_clusters_compatible();
 
 	pg_log(PG_REPORT,
@@ -159,6 +173,31 @@ main(int argc, char **argv)
 	copy_xact_xlog_xid();
 
 	/*
+	 * GPDB: This used to be right before syncing the data directory to disk
+	 * but is needed here before create_new_objects() due to our usage of a
+	 * preserved oid list. When creating new objects on the target cluster,
+	 * objects that do not have a preassigned oid will try to get a new oid
+	 * from the oid counter. This works in upstream Postgres but can be slow
+	 * in GPDB because the new oid is checked against the preserved oid
+	 * list. If the new oid is in the preserved oid list, a new oid is
+	 * generated from the oid counter until a valid oid is found. In
+	 * production scenarios, it would be very common to have a very, very
+	 * large preserved oid list and starting the oid counter from
+	 * FirstNormalObjectId (16384) would make object creation slower than
+	 * usual near the beginning of pg_restore. To prevent pg_restore
+	 * performance degradation from so many invalid new oids from the oid
+	 * counter, bump the oid counter to what the source cluster has via
+	 * pg_resetwal. If the preserved oid list logic is removed from
+	 * pg_upgrade, move this step back to where it was before.
+	 */
+	prep_status("Setting next OID for new cluster");
+	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
+			  "\"%s/pg_resetwal\" --binary-upgrade -o %u \"%s\"",
+			  new_cluster.bindir, old_cluster.controldata.chkpnt_nxtoid,
+			  new_cluster.pgdata);
+	check_ok();
+
+	/*
 	 * In upgrading from GPDB4, copy the pg_distributedlog over in vanilla.
 	 * The assumption that this works needs to be verified
 	 */
@@ -171,11 +210,6 @@ main(int argc, char **argv)
 
 	if (is_greenplum_dispatcher_mode())
 	{
-		/*
-		 * GPDB_12_MERGE_FIXME: this is where we used to create new databases
-		 * in case we were the dispatcher, now upstream does prepare_new_globals.
-		 * Verify that this replacement is what we want.
-		 */
 		prepare_new_globals();
 
 		create_new_objects();
@@ -210,19 +244,6 @@ main(int argc, char **argv)
 
 	transfer_all_new_tablespaces(&old_cluster.dbarr, &new_cluster.dbarr,
 								 old_cluster.pgdata, new_cluster.pgdata);
-
-	/*
-	 * Assuming OIDs are only used in system tables, there is no need to
-	 * restore the OID counter because we have not transferred any OIDs from
-	 * the old system, but we do it anyway just in case.  We do it late here
-	 * because there is no need to have the schema load use new oids.
-	 */
-	prep_status("Setting next OID for new cluster");
-	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
-			  "\"%s/pg_resetwal\" --binary-upgrade -o %u \"%s\"",
-			  new_cluster.bindir, old_cluster.controldata.chkpnt_nxtoid,
-			  new_cluster.pgdata);
-	check_ok();
 
 	/* For non-master segments, uniquify the system identifier. */
 	if (!is_greenplum_dispatcher_mode())
@@ -405,13 +426,16 @@ setup(char *argv0, bool *live_check)
 	}
 
 	/* same goes for the new postmaster */
-	if (pid_lock_file_exists(new_cluster.pgdata))
+	if (!is_skip_target_check())
 	{
-		if (start_postmaster(&new_cluster, false))
-			stop_postmaster(false);
-		else
-			pg_fatal("There seems to be a postmaster servicing the new cluster.\n"
-					 "Please shutdown that postmaster and try again.\n");
+		if (pid_lock_file_exists(new_cluster.pgdata))
+		{
+			if (start_postmaster(&new_cluster, false))
+				stop_postmaster(false);
+			else
+				pg_fatal("There seems to be a postmaster servicing the new cluster.\n"
+						 "Please shutdown that postmaster and try again.\n");
+		}
 	}
 
 	/* get path to pg_upgrade executable */
@@ -527,6 +551,7 @@ create_new_objects(void)
 				  true,
 				  true,
 				  "\"%s/pg_restore\" %s %s --exit-on-error --verbose "
+				  "--binary-upgrade "
 				  "--dbname postgres \"%s\"",
 				  new_cluster.bindir,
 				  cluster_conn_opts(&new_cluster),
@@ -585,13 +610,14 @@ create_new_objects(void)
 	 * We don't have minmxids for databases or relations in pre-9.3 clusters,
 	 * so set those after we have restored the schema.
 	 */
-	if (GET_MAJOR_VERSION(old_cluster.major_version) < 903)
+	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 902)
 		set_frozenxids(true);
 
 	/* update new_cluster info now that we have objects in the databases */
 	get_db_and_rel_infos(&new_cluster);
 
-	after_create_new_objects_greenplum();
+	/* TODO: Bitmap indexes are not supported, so mark them as invalid. */
+	new_gpdb_invalidate_bitmap_indexes();
 }
 
 
@@ -659,10 +685,17 @@ copy_xact_xlog_xid(void)
 	 * Copy old commit logs to new data dir. pg_clog has been renamed to
 	 * pg_xact in post-10 clusters.
 	 */
-	copy_subdir_files(GET_MAJOR_VERSION(old_cluster.major_version) < 1000 ?
+	copy_subdir_files(GET_MAJOR_VERSION(old_cluster.major_version) <= 906 ?
 					  "pg_clog" : "pg_xact",
-					  GET_MAJOR_VERSION(new_cluster.major_version) < 1000 ?
+					  GET_MAJOR_VERSION(new_cluster.major_version) <= 906 ?
 					  "pg_clog" : "pg_xact");
+
+	prep_status("Setting oldest XID for new cluster");
+	exec_prog(UTILITY_LOG_FILE, NULL, true, true,
+			  "\"%s/pg_resetwal\" --binary-upgrade -f -u %u \"%s\"",
+			  new_cluster.bindir, old_cluster.controldata.chkpnt_oldstxid,
+			  new_cluster.pgdata);
+	check_ok();
 
 	/* set the next transaction id and epoch of the new cluster */
 	prep_status("Setting next transaction ID and epoch for new cluster");

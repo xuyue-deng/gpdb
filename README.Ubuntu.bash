@@ -32,14 +32,12 @@ sudo apt-get install -y \
 	openssh-client \
 	openssh-server \
 	openssl \
+	pkg-config \
 	python3-dev \
 	python3-pip \
 	python3-psutil \
-	python3-pygresql \
 	python3-yaml \
 	zlib1g-dev
-
-pip3 install conan
 
 sudo tee -a /etc/sysctl.conf << EOF
 kernel.shmmax = 5000000000000

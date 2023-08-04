@@ -127,6 +127,7 @@ static const char *pam_passwd = NULL;	/* Workaround for Solaris 2.6
 										 * brokenness */
 static Port *pam_port_cludge;	/* Workaround for passing "Port *port" into
 								 * pam_passwd_conv_proc */
+static bool pam_no_password;	/* For detecting no-password-given */
 #endif							/* USE_PAM */
 
 
@@ -353,6 +354,18 @@ auth_failed(Port *port, int status, char *logdetail)
 
 	cdetail = psprintf(_("Connection matched pg_hba.conf line %d: \"%s\""),
 					   port->hba->linenumber, port->hba->rawline);
+
+	/*
+	 * Avoid leak user informations when failed to connect database using LDAP,
+	 * and we need hide failed details return by LDAP.
+	 * */
+    if (port->hba->auth_method == uaLDAP)
+    {
+        pfree(cdetail);
+        cdetail = NULL;
+        logdetail = NULL;
+    }
+
 	if (logdetail)
 		logdetail = psprintf("%s\n%s", logdetail, cdetail);
 	else
@@ -521,78 +534,65 @@ retrieve_conn_authentication(Port *port)
 
 /*
  * Special client authentication for QD to QE connections. This is run at the
- * QE. This is non-trivial because a QE some times runs at the master (i.e., an
- * entry-DB for things like master only tables).
+ * QE. This is non-trivial because a QE some times runs at the coordinator (i.e., an
+ * entry-DB for things like coordinator only tables).
  */
 static int
 internal_client_authentication(Port *port)
 {
 	if (IS_QUERY_DISPATCHER())
 	{
-		/* 
-		 * The entry-DB (or QE at the master) case.
+		/*
+		 * The entry-DB (or QE at the coordinator) case.
 		 *
 		 * The goal here is to block network connection from out of
-		 * master to master db with magic bit packet.
+		 * coordinator to coordinator db with magic bit packet.
 		 * So, only when it comes from the same host, the connection
-		 * is authenticated, if this connection is TCP/UDP. We
-		 * don't assume the connection is via unix domain socket,
-		 * but if it comes, just authenticate it. We'll need to
-		 * verify user on UDS case, but for now we don't do too much
-		 * for the goal described above.
+		 * is authenticated, if this connection is TCP/UDP.
+		 *
+		 * If unix domain socket comes, just authenticate it.
 		 */
-		if(port->raddr.addr.ss_family == AF_INET
+		if (port->raddr.addr.ss_family == AF_INET
 #ifdef HAVE_IPV6
-				|| port->raddr.addr.ss_family == AF_INET6
+			|| port->raddr.addr.ss_family == AF_INET6
 #endif   /* HAVE_IPV6 */
-			   )
+		   )
 		{
-			if (check_same_host_or_net(&port->raddr, ipCmpSameHost) &&
-				!gp_reject_internal_tcp_conn)
+			if (check_same_host_or_net(&port->raddr, ipCmpSameHost))
 			{
-				elog(DEBUG1, "received same host internal TCP connection");
-				FakeClientAuthentication(port);
+				if (gp_reject_internal_tcp_conn)
+				{
+					elog(DEBUG1, "rejecting TCP connection to coordinator using internal"
+						 "connection protocol, because the GUC gp_reject_internal_tcp_conn is true");
+					return false;
+				}
+				else
+				{
+					elog(DEBUG1, "received same host internal TCP connection");
+					FakeClientAuthentication(port);
+					return true;
+				}
 			}
-			else
-			{
-				/* Security violation? */
-				elog(LOG, "rejecting TCP connection to master using internal"
-					 "connection protocol");
-				return false;
-			}
-			return true;
+
+			/* Security violation? */
+			elog(LOG, "rejecting TCP connection to coordinator using internal"
+				 "connection protocol");
+			return false;
 		}
 #ifdef HAVE_UNIX_SOCKETS
 		else if (port->raddr.addr.ss_family == AF_UNIX)
 		{
-			/* 
-			 * Internal connection via a domain socket -- use ident
+			/*
+			 * Internal connection via a domain socket -- consider it authenticated
 			 */
-			char *local_name;
-			struct passwd *pw;
-
-			pw = getpwuid(geteuid());
-			if (pw == NULL)
-			{
-				elog(LOG, "invalid effective UID %d ", geteuid());
-				return false;
-			}
-
-			local_name = pw->pw_name;
-
-			if (!auth_peer(port))
-				return false;
-			else
-			{
-				FakeClientAuthentication(port);
-				return true;
-			}
+			FakeClientAuthentication(port);
+			return true;
 		}
 #endif   /* HAVE_UNIX_SOCKETS */
 		else
 		{
 			/* Security violation? */
-			elog(LOG, "rejecting TCP connection to master using internal"
+			elog(LOG, "rejecting TCP connection to coordinator using internal"
 				 "connection protocol");
 			return false;
 		}
@@ -691,17 +691,6 @@ ClientAuthentication(Port *port)
 					 errmsg("connection requires a valid client certificate")));
 	}
 
-#ifdef ENABLE_GSS
-	if (port->gss->enc && port->hba->auth_method != uaReject &&
-		port->hba->auth_method != uaImplicitReject &&
-		port->hba->auth_method != uaTrust &&
-		port->hba->auth_method != uaGSS)
-	{
-		ereport(FATAL, (errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-						errmsg("GSSAPI encryption can only be used with gss, trust, or reject authentication methods")));
-	}
-#endif
-
 	/*
 	 * Now proceed to do the actual authentication check
 	 */
@@ -721,44 +710,37 @@ ClientAuthentication(Port *port)
 			 */
 			{
 				char		hostinfo[NI_MAXHOST];
+				const char *encryption_state;
 
 				pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
 								   hostinfo, sizeof(hostinfo),
 								   NULL, 0,
 								   NI_NUMERICHOST);
 
-				if (am_walsender)
-				{
+				encryption_state =
+#ifdef ENABLE_GSS
+					(port->gss && port->gss->enc) ? _("GSS encryption") :
+#endif
 #ifdef USE_SSL
+					port->ssl_in_use ? _("SSL on") :
+#endif
+					_("SSL off");
+
+				if (am_walsender)
 					ereport(FATAL,
 							(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+					/* translator: last %s describes encryption state */
 							 errmsg("pg_hba.conf rejects replication connection for host \"%s\", user \"%s\", %s",
 									hostinfo, port->user_name,
-									port->ssl_in_use ? _("SSL on") : _("SSL off"))));
-#else
-					ereport(FATAL,
-							(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-							 errmsg("pg_hba.conf rejects replication connection for host \"%s\", user \"%s\"",
-									hostinfo, port->user_name)));
-#endif
-				}
+									encryption_state)));
 				else
-				{
-#ifdef USE_SSL
 					ereport(FATAL,
 							(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+					/* translator: last %s describes encryption state */
 							 errmsg("pg_hba.conf rejects connection for host \"%s\", user \"%s\", database \"%s\", %s",
 									hostinfo, port->user_name,
 									port->database_name,
-									port->ssl_in_use ? _("SSL on") : _("SSL off"))));
-#else
-					ereport(FATAL,
-							(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-							 errmsg("pg_hba.conf rejects connection for host \"%s\", user \"%s\", database \"%s\"",
-									hostinfo, port->user_name,
-									port->database_name)));
-#endif
-				}
+									encryption_state)));
 				break;
 			}
 
@@ -774,11 +756,21 @@ ClientAuthentication(Port *port)
 			 */
 			{
 				char		hostinfo[NI_MAXHOST];
+				const char *encryption_state;
 
 				pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
 								   hostinfo, sizeof(hostinfo),
 								   NULL, 0,
 								   NI_NUMERICHOST);
+
+				encryption_state =
+#ifdef ENABLE_GSS
+					(port->gss && port->gss->enc) ? _("GSS encryption") :
+#endif
+#ifdef USE_SSL
+					port->ssl_in_use ? _("SSL on") :
+#endif
+					_("SSL off");
 
 #define HOSTNAME_LOOKUP_DETAIL(port) \
 				(port->remote_hostname ? \
@@ -802,41 +794,22 @@ ClientAuthentication(Port *port)
 					0))
 
 				if (am_walsender)
-				{
-#ifdef USE_SSL
 					ereport(FATAL,
 							(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+					/* translator: last %s describes encryption state */
 							 errmsg("no pg_hba.conf entry for replication connection from host \"%s\", user \"%s\", %s",
 									hostinfo, port->user_name,
-									port->ssl_in_use ? _("SSL on") : _("SSL off")),
+									encryption_state),
 							 HOSTNAME_LOOKUP_DETAIL(port)));
-#else
-					ereport(FATAL,
-							(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-							 errmsg("no pg_hba.conf entry for replication connection from host \"%s\", user \"%s\"",
-									hostinfo, port->user_name),
-							 HOSTNAME_LOOKUP_DETAIL(port)));
-#endif
-				}
 				else
-				{
-#ifdef USE_SSL
 					ereport(FATAL,
 							(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+					/* translator: last %s describes encryption state */
 							 errmsg("no pg_hba.conf entry for host \"%s\", user \"%s\", database \"%s\", %s",
 									hostinfo, port->user_name,
 									port->database_name,
-									port->ssl_in_use ? _("SSL on") : _("SSL off")),
+									encryption_state),
 							 HOSTNAME_LOOKUP_DETAIL(port)));
-#else
-					ereport(FATAL,
-							(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-							 errmsg("no pg_hba.conf entry for host \"%s\", user \"%s\", database \"%s\"",
-									hostinfo, port->user_name,
-									port->database_name),
-							 HOSTNAME_LOOKUP_DETAIL(port)));
-#endif
-				}
 				break;
 			}
 
@@ -850,7 +823,17 @@ ClientAuthentication(Port *port)
 							port->user_name)));
 			}
 
+			/* We might or might not have the gss workspace already */
+			if (port->gss == NULL)
+				port->gss = (pg_gssinfo *)
+					MemoryContextAllocZero(TopMemoryContext,
+										   sizeof(pg_gssinfo));
 			port->gss->auth = true;
+
+			/*
+			 * If GSS state was set up while enabling encryption, we can just
+			 * check the client's principal.  Otherwise, ask for it.
+			 */
 			if (port->gss->enc)
 				status = pg_GSS_checkauth(port);
 			else
@@ -865,6 +848,10 @@ ClientAuthentication(Port *port)
 
 		case uaSSPI:
 #ifdef ENABLE_SSPI
+			if (port->gss == NULL)
+				port->gss = (pg_gssinfo *)
+					MemoryContextAllocZero(TopMemoryContext,
+										   sizeof(pg_gssinfo));
 			sendAuthRequest(port, AUTH_REQ_SSPI, NULL, 0);
 			status = pg_SSPI_recvauth(port);
 #else
@@ -1441,29 +1428,18 @@ pg_GSS_recvauth(Port *port)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("GSSAPI is not supported in protocol version 2")));
 
-	if (pg_krb_server_keyfile && strlen(pg_krb_server_keyfile) > 0)
+	/*
+	 * Use the configured keytab, if there is one.  Unfortunately, Heimdal
+	 * doesn't support the cred store extensions, so use the env var.
+	 */
+	if (pg_krb_server_keyfile != NULL && pg_krb_server_keyfile[0] != '\0')
 	{
-		/*
-		 * Set default Kerberos keytab file for the Krb5 mechanism.
-		 *
-		 * setenv("KRB5_KTNAME", pg_krb_server_keyfile, 0); except setenv()
-		 * not always available.
-		 */
-		if (getenv("KRB5_KTNAME") == NULL)
+		if (setenv("KRB5_KTNAME", pg_krb_server_keyfile, 1) != 0)
 		{
-			size_t		kt_len = strlen(pg_krb_server_keyfile) + 14;
-			char	   *kt_path = malloc(kt_len);
-
-			if (!kt_path ||
-				snprintf(kt_path, kt_len, "KRB5_KTNAME=%s",
-						 pg_krb_server_keyfile) != kt_len - 2 ||
-				putenv(kt_path) != 0)
-			{
-				ereport(LOG,
-						(errcode(ERRCODE_OUT_OF_MEMORY),
-						 errmsg("out of memory")));
-				return STATUS_ERROR;
-			}
+			/* The only likely failure cause is OOM, so use that errcode */
+			ereport(FATAL,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("could not set environment: %m")));
 		}
 	}
 
@@ -1517,7 +1493,7 @@ pg_GSS_recvauth(Port *port)
 		gbuf.length = buf.len;
 		gbuf.value = buf.data;
 
-		elog(DEBUG4, "Processing received GSS token of length %u",
+		elog(DEBUG4, "processing received GSS token of length %u",
 			 (unsigned int) gbuf.length);
 
 		maj_stat = gss_accept_sec_context(
@@ -1560,9 +1536,9 @@ pg_GSS_recvauth(Port *port)
 		if (maj_stat != GSS_S_COMPLETE && maj_stat != GSS_S_CONTINUE_NEEDED)
 		{
 			gss_delete_sec_context(&lmin_s, &port->gss->ctx, GSS_C_NO_BUFFER);
-			pg_GSS_error_be(ERROR,
-						 _("accepting GSS security context failed"),
-						 maj_stat, min_stat);
+			pg_GSS_error_be(_("accepting GSS security context failed"),
+							maj_stat, min_stat);
+			return STATUS_ERROR;
 		}
 
 		if (maj_stat == GSS_S_CONTINUE_NEEDED)
@@ -1592,6 +1568,7 @@ pg_GSS_checkauth(Port *port)
 				min_stat,
 				lmin_s;
 	gss_buffer_desc gbuf;
+	char	   *princ;
 
 	/*
 	 * Get the name of the user that authenticated, and compare it to the pg
@@ -1599,22 +1576,33 @@ pg_GSS_checkauth(Port *port)
 	 */
 	maj_stat = gss_display_name(&min_stat, port->gss->name, &gbuf, NULL);
 	if (maj_stat != GSS_S_COMPLETE)
-		pg_GSS_error_be(ERROR,
-					 _("retrieving GSS user name failed"),
-					 maj_stat, min_stat);
+	{
+		pg_GSS_error_be(_("retrieving GSS user name failed"),
+						maj_stat, min_stat);
+		return STATUS_ERROR;
+	}
+
+	/*
+	 * gbuf.value might not be null-terminated, so turn it into a regular
+	 * null-terminated string.
+	 */
+	princ = palloc(gbuf.length + 1);
+	memcpy(princ, gbuf.value, gbuf.length);
+	princ[gbuf.length] = '\0';
+	gss_release_buffer(&lmin_s, &gbuf);
 
 	/*
 	 * Copy the original name of the authenticated principal into our backend
 	 * memory for display later.
 	 */
-	port->gss->princ = MemoryContextStrdup(TopMemoryContext, gbuf.value);
+	port->gss->princ = MemoryContextStrdup(TopMemoryContext, princ);
 
 	/*
 	 * Split the username at the realm separator
 	 */
-	if (strchr(gbuf.value, '@'))
+	if (strchr(princ, '@'))
 	{
-		char	   *cp = strchr(gbuf.value, '@');
+		char	   *cp = strchr(princ, '@');
 
 		/*
 		 * If we are not going to include the realm in the username that is
@@ -1641,7 +1629,7 @@ pg_GSS_checkauth(Port *port)
 				elog(DEBUG2,
 					 "GSSAPI realm (%s) and configured realm (%s) don't match",
 					 cp, port->hba->krb_realm);
-				gss_release_buffer(&lmin_s, &gbuf);
+				pfree(princ);
 				return STATUS_ERROR;
 			}
 		}
@@ -1650,15 +1638,14 @@ pg_GSS_checkauth(Port *port)
 	{
 		elog(DEBUG2,
 			 "GSSAPI did not return realm but realm matching was requested");
-
-		gss_release_buffer(&lmin_s, &gbuf);
+		pfree(princ);
 		return STATUS_ERROR;
 	}
 
-	ret = check_usermap(port->hba->usermap, port->user_name, gbuf.value,
+	ret = check_usermap(port->hba->usermap, port->user_name, princ,
 						pg_krb_caseins_users);
 
-	gss_release_buffer(&lmin_s, &gbuf);
+	pfree(princ);
 
 	return ret;
 }
@@ -1795,7 +1782,7 @@ pg_SSPI_recvauth(Port *port)
 		outbuf.ulVersion = SECBUFFER_VERSION;
 
 
-		elog(DEBUG4, "Processing received SSPI token of length %u",
+		elog(DEBUG4, "processing received SSPI token of length %u",
 			 (unsigned int) buf.len);
 
 		r = AcceptSecurityContext(&sspicred,
@@ -2465,8 +2452,10 @@ pam_passwd_conv_proc(int num_msg, const struct pam_message **msg,
 					{
 						/*
 						 * Client didn't want to send password.  We
-						 * intentionally do not log anything about this.
+						 * intentionally do not log anything about this,
+						 * either here or at higher levels.
 						 */
+						pam_no_password = true;
 						goto fail;
 					}
 				}
@@ -2525,6 +2514,7 @@ CheckPAMAuth(Port *port, const char *user, const char *password)
 	 */
 	pam_passwd = password;
 	pam_port_cludge = port;
+	pam_no_password = false;
 
 	/*
 	 * Set the application data portion of the conversation struct.  This is
@@ -2610,22 +2600,26 @@ CheckPAMAuth(Port *port, const char *user, const char *password)
 
 	if (retval != PAM_SUCCESS)
 	{
-		ereport(LOG,
-				(errmsg("pam_authenticate failed: %s",
-						pam_strerror(pamh, retval))));
+		/* If pam_passwd_conv_proc saw EOF, don't log anything */
+		if (!pam_no_password)
+			ereport(LOG,
+					(errmsg("pam_authenticate failed: %s",
+							pam_strerror(pamh, retval))));
 		pam_passwd = NULL;		/* Unset pam_passwd */
-		return STATUS_ERROR;
+		return pam_no_password ? STATUS_EOF : STATUS_ERROR;
 	}
 
 	retval = pam_acct_mgmt(pamh, 0);
 
 	if (retval != PAM_SUCCESS)
 	{
-		ereport(LOG,
-				(errmsg("pam_acct_mgmt failed: %s",
-						pam_strerror(pamh, retval))));
+		/* If pam_passwd_conv_proc saw EOF, don't log anything */
+		if (!pam_no_password)
+			ereport(LOG,
+					(errmsg("pam_acct_mgmt failed: %s",
+							pam_strerror(pamh, retval))));
 		pam_passwd = NULL;		/* Unset pam_passwd */
-		return STATUS_ERROR;
+		return pam_no_password ? STATUS_EOF : STATUS_ERROR;
 	}
 
 	retval = pam_end(pamh, retval);
@@ -3169,8 +3163,7 @@ CheckLDAPAuth(Port *port)
 	if (r != LDAP_SUCCESS)
 	{
 		ereport(LOG,
-				(errmsg("LDAP login failed for user \"%s\" on server \"%s\": %s",
-						fulluser, server_name, ldap_err2string(r)),
+				(errmsg("LDAP login failed for user on server."),
 				 errdetail_for_ldap(ldap)));
 		ldap_unbind(ldap);
 		pfree(passwd);
@@ -3242,7 +3235,7 @@ CheckCertAuth(Port *port)
 		if (port->hba->clientcert == clientCertFull && port->hba->auth_method != uaCert)
 		{
 			ereport(LOG,
-					(errmsg("certificate validation (clientcert=verify-full) failed for user \"%s\": cn mismatch",
+					(errmsg("certificate validation (clientcert=verify-full) failed for user \"%s\": CN mismatch",
 							port->user_name)));
 		}
 	}
@@ -3315,7 +3308,7 @@ radius_add_attribute(radius_packet *packet, uint8 type, const unsigned char *dat
 		 * fail.
 		 */
 		elog(WARNING,
-			 "Adding attribute code %d with length %d to radius packet would create oversize packet, ignoring",
+			 "adding attribute code %d with length %d to radius packet would create oversize packet, ignoring",
 			 type, len);
 		return;
 	}

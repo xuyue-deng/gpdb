@@ -19,7 +19,7 @@ select * from x where x.i in (select last_value(y.i) over(partition by x.i order
     </dxl:OptimizerConfig>
     <dxl:Metadata SystemIds="0.GPDB">
       <dxl:RelationStatistics Mdid="2.16422594.1.1" Name="x" Rows="100.000000" EmptyRelation="false"/>
-      <dxl:Relation Mdid="0.16422594.1.0" Name="x" IsTemporary="false" HasOids="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="9,3">
+      <dxl:Relation Mdid="6.16422594.1.0" Name="x" IsTemporary="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="9,3">
         <dxl:Columns>
           <dxl:Column Name="i" Attno="1" Mdid="0.23.1.0" Nullable="true" ColWidth="4">
             <dxl:DefaultValue/>
@@ -56,10 +56,9 @@ select * from x where x.i in (select last_value(y.i) over(partition by x.i order
           <dxl:IndexInfo Mdid="0.17159874.1.0" IsPartial="false"/>
           <dxl:IndexInfo Mdid="0.17159920.1.0" IsPartial="false"/>
         </dxl:IndexInfoList>
-        <dxl:Triggers/>
         <dxl:CheckConstraints/>
       </dxl:Relation>
-      <dxl:Relation Mdid="0.16422594.1.1" Name="x" IsTemporary="false" HasOids="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="9,3">
+      <dxl:Relation Mdid="6.16422594.1.1" Name="x" IsTemporary="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="9,3">
         <dxl:Columns>
           <dxl:Column Name="i" Attno="1" Mdid="0.23.1.0" Nullable="true" ColWidth="4">
             <dxl:DefaultValue/>
@@ -96,7 +95,6 @@ select * from x where x.i in (select last_value(y.i) over(partition by x.i order
           <dxl:IndexInfo Mdid="0.17159874.1.0" IsPartial="false"/>
           <dxl:IndexInfo Mdid="0.17159920.1.0" IsPartial="false"/>
         </dxl:IndexInfoList>
-        <dxl:Triggers/>
         <dxl:CheckConstraints/>
       </dxl:Relation>
       <dxl:Type Mdid="0.16.1.0" Name="bool" IsRedistributable="true" IsHashable="true" IsMergeJoinable="true" IsComposite="false" IsFixedLength="true" Length="1" PassByValue="true">
@@ -619,13 +617,13 @@ select * from x where x.i in (select last_value(y.i) over(partition by x.i order
         <dxl:ResultType Mdid="0.20.1.0"/>
         <dxl:IntermediateResultType Mdid="0.20.1.0"/>
       </dxl:GPDBAgg>
-      <dxl:Index Mdid="0.17159874.1.0" Name="idx_x_j" IsClustered="false" IndexType="B-tree" KeyColumns="1" IncludedColumns="0,1,2,3,4,5,6,7,8,9">
+      <dxl:Index Mdid="0.17159874.1.0" Name="idx_x_j" IsClustered="false" IndexType="B-tree" KeyColumns="1" IncludedColumns="">
         <dxl:Opfamilies>
           <dxl:Opfamily Mdid="0.1978.1.0"/>
         </dxl:Opfamilies>
       </dxl:Index>
       <dxl:RelationStatistics Mdid="2.16414481.1.1" Name="y" Rows="49829.000000" EmptyRelation="false"/>
-      <dxl:Relation Mdid="0.16414481.1.1" Name="y" IsTemporary="false" HasOids="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="9,3">
+      <dxl:Relation Mdid="6.16414481.1.1" Name="y" IsTemporary="false" StorageType="Heap" DistributionPolicy="Hash" DistributionColumns="0" Keys="9,3">
         <dxl:Columns>
           <dxl:Column Name="i" Attno="1" Mdid="0.23.1.0" Nullable="true" ColWidth="4">
             <dxl:DefaultValue/>
@@ -659,7 +657,6 @@ select * from x where x.i in (select last_value(y.i) over(partition by x.i order
           </dxl:Column>
         </dxl:Columns>
         <dxl:IndexInfoList/>
-        <dxl:Triggers/>
         <dxl:CheckConstraints/>
       </dxl:Relation>
       <dxl:ColumnStatistics Mdid="1.16414481.1.1.5" Name="cmin" Width="4.000000" NullFreq="0.000000" NdvRemain="0.000000" FreqRemain="0.000000"/>
@@ -691,14 +688,14 @@ select * from x where x.i in (select last_value(y.i) over(partition by x.i order
           <dxl:Opfamily Mdid="0.3027.1.0"/>
         </dxl:Opfamilies>
       </dxl:GPDBScalarOp>
-      <dxl:GPDBFunc Mdid="0.7012.1.0" Name="last_value" ReturnsSet="false" Stability="Immutable" DataAccess="NoSQL" IsStrict="false">
+      <dxl:GPDBFunc Mdid="0.7012.1.0" Name="last_value" ReturnsSet="false" Stability="Immutable" IsStrict="false">
         <dxl:ResultType Mdid="0.23.1.0"/>
       </dxl:GPDBFunc>
       <dxl:GPDBAgg Mdid="0.2803.1.0" Name="count" IsSplittable="true">
         <dxl:ResultType Mdid="0.20.1.0"/>
         <dxl:IntermediateResultType Mdid="0.20.1.0"/>
       </dxl:GPDBAgg>
-      <dxl:Index Mdid="0.17159920.1.0" Name="idx_x_i" IsClustered="false" IndexType="B-tree" KeyColumns="0" IncludedColumns="0,1,2,3,4,5,6,7,8,9">
+      <dxl:Index Mdid="0.17159920.1.0" Name="idx_x_i" IsClustered="false" IndexType="B-tree" KeyColumns="0" IncludedColumns="">
         <dxl:Opfamilies>
           <dxl:Opfamily Mdid="0.1978.1.0"/>
         </dxl:Opfamilies>
@@ -742,7 +739,7 @@ select * from x where x.i in (select last_value(y.i) over(partition by x.i order
               </dxl:ProjElem>
             </dxl:ProjList>
             <dxl:LogicalGet>
-              <dxl:TableDescriptor Mdid="0.16414481.1.1" TableName="y">
+              <dxl:TableDescriptor Mdid="6.16414481.1.1" TableName="y">
                 <dxl:Columns>
                   <dxl:Column ColId="11" Attno="1" ColName="i" TypeMdid="0.23.1.0"/>
                   <dxl:Column ColId="12" Attno="2" ColName="j" TypeMdid="0.23.1.0"/>
@@ -760,7 +757,7 @@ select * from x where x.i in (select last_value(y.i) over(partition by x.i order
           </dxl:LogicalWindow>
         </dxl:SubqueryAny>
         <dxl:LogicalGet>
-          <dxl:TableDescriptor Mdid="0.16422594.1.1" TableName="x">
+          <dxl:TableDescriptor Mdid="6.16422594.1.1" TableName="x">
             <dxl:Columns>
               <dxl:Column ColId="1" Attno="1" ColName="i" TypeMdid="0.23.1.0"/>
               <dxl:Column ColId="2" Attno="2" ColName="j" TypeMdid="0.23.1.0"/>

@@ -4,13 +4,15 @@
 -- The expectation is "alter resource group" can run successfully since the mirror segment is UP. 
 -- After recover the segment, there is no error or blocking.
 
+create extension if not exists gp_inject_fault;
+
 -- set these values purely to cut down test time, as default fts trigger is
 -- every min and 5 retries
 alter system set gp_fts_probe_interval to 10;
 alter system set gp_fts_probe_retries to 0;
 select pg_reload_conf();
 
-1:create resource group rgroup_seg_down with (CPU_RATE_LIMIT=35, MEMORY_LIMIT=35, CONCURRENCY=10);
+1:create resource group rgroup_seg_down with (cpu_max_percent=35, CONCURRENCY=10);
 
 -- inject an error in function dtm_broadcast_commit_prepared, that is before QD broadcasts commit prepared command to QEs
 2:select gp_inject_fault_infinite('dtm_broadcast_commit_prepared', 'suspend', dbid) from gp_segment_configuration where role='p' and content=-1;
@@ -23,8 +25,8 @@ select pg_reload_conf();
 2:select status = 'd' from gp_segment_configuration where content = 0 and role = 'm';
 -- reset the injected fault on QD and the "alter resource group" in session1 can continue
 2:select gp_inject_fault('dtm_broadcast_commit_prepared', 'reset', dbid) from gp_segment_configuration where role='p' and content=-1;
--- reset the injected fault on primary segment
-2:select gp_inject_fault('fts_conn_startup_packet', 'reset', dbid) from gp_segment_configuration where content=0;
+-- No need to reset fts_conn_startup_packet fault inject because the segment we have set
+-- is down now, and later we will full recover it back with new init clean shared memory.
 1<:
 -- make sure "alter resource group" has taken effect.
 1:select concurrency from gp_toolkit.gp_resgroup_config where groupname = 'rgroup_seg_down';

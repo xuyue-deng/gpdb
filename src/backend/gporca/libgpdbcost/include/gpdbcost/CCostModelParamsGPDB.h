@@ -104,6 +104,9 @@ public:
 		EcpBitmapScanRebindCost,	// cost of rebind operation in a bitmap scan
 		EcpPenalizeHJSkewUpperLimit,  // upper limit for penalizing a skewed hashjoin operator
 
+		EcpScalarFuncCost,			  // cost of scalar func
+		EcpIndexOnlyScanTupCostUnit,  // index only scan cost per tuple retrieving
+
 		EcpSentinel
 	};
 
@@ -144,6 +147,9 @@ private:
 
 	// default value of index scan cost unit per tuple per unit width
 	static const CDouble DIndexScanTupCostUnitVal;
+
+	// default value of index only scan cost unit per tuple per unit width
+	static const CDouble DIndexOnlyScanTupCostUnitVal;
 
 	// default value of index scan random IO cost unit per tuple
 	static const CDouble DIndexScanTupRandomFactorVal;
@@ -273,6 +279,9 @@ private:
 
 	// upper limit for penalizing a skewed hash operator
 	static const CDouble DPenalizeHJSkewUpperLimit;
+
+	// default value of compute scalar func cost
+	static const CDouble DScalarFuncCost;
 
 public:
 	CCostModelParamsGPDB(CCostModelParamsGPDB &) = delete;

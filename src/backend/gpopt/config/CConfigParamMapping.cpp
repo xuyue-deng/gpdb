@@ -211,16 +211,22 @@ CConfigParamMapping::SConfigMappingElem CConfigParamMapping::m_elements[] = {
 	 GPOS_WSZ_LIT(
 		 "Enable plan alternatives where NLJ's outer child is replicated")},
 
+	{EopttraceDiscardRedistributeHashJoin,
+	 &optimizer_discard_redistribute_hashjoin,
+	 false,	 // m_negate_param
+	 GPOS_WSZ_LIT(
+		 "Discard plan alternatives where hash join has a redistribute motion child")},
+
 	{EopttraceMotionHazardHandling, &optimizer_enable_streaming_material,
 	 false,	 // m_fNegate
 	 GPOS_WSZ_LIT(
 		 "Enable motion hazard handling during NLJ optimization and generate streaming material when appropriate")},
 
-	{EopttraceDisableNonMasterGatherForDML,
+	{EopttraceDisableNonCoordinatorGatherForDML,
 	 &optimizer_enable_gather_on_segment_for_dml,
 	 true,	// m_fNegate
 	 GPOS_WSZ_LIT(
-		 "Enable DML optimization by enforcing a non-master gather when appropriate")},
+		 "Enable DML optimization by enforcing a non-coordinator gather when appropriate")},
 
 	{EopttraceEnforceCorrelatedExecution, &optimizer_enforce_subplans,
 	 false,	 // m_negate_param
@@ -272,9 +278,6 @@ CConfigParamMapping::SConfigMappingElem CConfigParamMapping::m_elements[] = {
 	 true,	// m_negate_param
 	 GPOS_WSZ_LIT(
 		 "Penalize a hash join with a skewed redistribute as a child.")},
-	{EopttraceTranslateUnusedColrefs, &optimizer_prune_unused_columns,
-	 true,	// m_negate_param
-	 GPOS_WSZ_LIT("Prune unused columns from the query.")},
 	{EopttraceAllowGeneralPredicatesforDPE,
 	 &optimizer_enable_range_predicate_dpe,
 	 false,	 // m_negate_param
@@ -285,6 +288,17 @@ CConfigParamMapping::SConfigMappingElem CConfigParamMapping::m_elements[] = {
 	 false,	 // m_negate_param
 	 GPOS_WSZ_LIT(
 		 "Enable plan alternatives where NLJ's inner child is redistributed")},
+	{EopttraceForceComprehensiveJoinImplementation,
+	 &optimizer_force_comprehensive_join_implementation,
+	 false,	 // m_negate_param
+	 GPOS_WSZ_LIT(
+		 "Explore a nested loop join even if a hash join is possible")},
+	{EopttraceDisableInnerHashJoin, &optimizer_enable_hashjoin,
+	 true,	// m_negate_param
+	 GPOS_WSZ_LIT("Explore hash join alternatives")},
+	{EopttraceDisableInnerNLJ, &optimizer_enable_nljoin,
+	 true,	// m_negate_param
+	 GPOS_WSZ_LIT("Enable nested loop join alternatives")},
 
 };
 
@@ -339,6 +353,13 @@ CConfigParamMapping::PackConfigParamInBitset(
 		}
 	}
 
+	if (!optimizer_enable_nljoin)
+	{
+		CBitSet *nl_join_bitset = CXform::PbsNLJoinXforms(mp);
+		traceflag_bitset->Union(nl_join_bitset);
+		nl_join_bitset->Release();
+	}
+
 	if (!optimizer_enable_indexjoin)
 	{
 		CBitSet *index_join_bitset = CXform::PbsIndexJoinXforms(mp);
@@ -368,11 +389,6 @@ CConfigParamMapping::PackConfigParamInBitset(
 			GPOPT_DISABLE_XFORM_TF(CXform::ExfMaxOneRow2Assert));
 	}
 
-	if (!optimizer_enable_partial_index)
-	{
-		// GPDB_12_MERGE_FIXME: Remove this GUC
-	}
-
 	if (!optimizer_enable_hashjoin)
 	{
 		// disable hash-join if the corresponding GUC is turned off
@@ -395,6 +411,16 @@ CConfigParamMapping::PackConfigParamInBitset(
 			GPOPT_DISABLE_XFORM_TF(CXform::ExfGet2TableScan));
 	}
 
+	if (!optimizer_enable_push_join_below_union_all)
+	{
+		// disable push join below union all transform if
+		// the corresponding GUC is turned off
+		traceflag_bitset->ExchangeSet(
+			GPOPT_DISABLE_XFORM_TF(CXform::ExfPushJoinBelowLeftUnionAll));
+		traceflag_bitset->ExchangeSet(
+			GPOPT_DISABLE_XFORM_TF(CXform::ExfPushJoinBelowRightUnionAll));
+	}
+
 	if (!optimizer_enable_indexscan)
 	{
 		// disable index scan if the corresponding GUC is turned off
@@ -407,6 +433,13 @@ CConfigParamMapping::PackConfigParamInBitset(
 		// disable index only scan if the corresponding GUC is turned off
 		traceflag_bitset->ExchangeSet(
 			GPOPT_DISABLE_XFORM_TF(CXform::ExfIndexGet2IndexOnlyScan));
+	}
+
+	if (!optimizer_enable_dynamicindexonlyscan)
+	{
+		// disable dynamic index only scan if the corresponding GUC is turned off
+		traceflag_bitset->ExchangeSet(GPOPT_DISABLE_XFORM_TF(
+			CXform::ExfDynamicIndexGet2DynamicIndexOnlyScan));
 	}
 
 	if (!optimizer_enable_hashagg)

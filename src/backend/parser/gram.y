@@ -198,6 +198,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 
+static bool isSetWithReorganize(List **options);
 static char *greenplumLegacyAOoptions(const char *accessMethod, List **options);
 static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_t yyscanner);
 
@@ -303,7 +304,9 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 		CreateExternalStmt
 		CreateQueueStmt CreateResourceGroupStmt
 		DropQueueStmt DropResourceGroupStmt
-		ExtTypedesc OptSingleRowErrorHandling ExtSingleRowErrorHandling
+		ExtTypedesc ExtSingleRowErrorHandling
+
+%type<list> 	OptSingleRowErrorHandling
 
 %type <node>    deny_login_role deny_interval deny_point deny_day_specifier
 
@@ -358,6 +361,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 %type <str>		opt_type
 %type <str>		foreign_server_version opt_foreign_server_version
 %type <str>		opt_in_database
+%type <str>		opt_coordinatoronly
 
 %type <list>	OptQueueList
 %type <defelt>	OptQueueElem
@@ -433,7 +437,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 				sort_clause opt_sort_clause sortby_list index_params
 				opt_include opt_c_include index_including_params
 				name_list role_list from_clause from_list opt_array_bounds
-				qualified_name_list any_name any_name_list type_name_list
+				qualified_name_list qualified_name_list_with_only any_name any_name_list type_name_list
 				any_operator expr_list attrs
 				target_list opt_target_list insert_column_list set_target_list
 				set_clause_list set_clause
@@ -497,7 +501,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 
 %type <boolean> opt_instead
 %type <boolean> opt_unique opt_concurrently opt_verbose opt_full
-%type <boolean> opt_freeze opt_analyze opt_default opt_recheck
+%type <boolean> opt_freeze opt_analyze opt_ao_aux_only opt_default opt_recheck
 %type <boolean> opt_dxl
 %type <defelt>	opt_binary copy_delimiter
 
@@ -704,7 +708,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 
 /* ordinary key words in alphabetical order */
 %token <keyword> ABORT_P ABSOLUTE_P ACCESS ACTION ADD_P ADMIN AFTER
-	AGGREGATE ALL ALSO ALTER ALWAYS ANALYSE ANALYZE AND ANY ARRAY AS ASC
+	AGGREGATE ALL ALSO ALTER ALWAYS AM ANALYSE ANALYZE AND ANY ARRAY AS ASC
 	ASSERTION ASSIGNMENT ASYMMETRIC AT ATTACH ATTRIBUTE AUTHORIZATION
 
 	BACKWARD BEFORE BEGIN_P BETWEEN BIGINT BINARY BIT
@@ -749,8 +753,8 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 	LEADING LEAKPROOF LEAST LEFT LEVEL LIKE LIMIT LISTEN LOAD LOCAL
 	LOCALTIME LOCALTIMESTAMP LOCATION LOCK_P LOCKED LOGGED
 
-	MAPPING MATCH MATERIALIZED MAXVALUE MEMORY_LIMIT MEMORY_SHARED_QUOTA MEMORY_SPILL_RATIO
-	METHOD MINUTE_P MINVALUE MODE MONTH_P MOVE
+	MAPPING MATCH MATERIALIZED MAXVALUE MEMORY_LIMIT
+	METHOD MINUTE_P MINVALUE MIN_COST MODE MONTH_P MOVE
 
 	NAME_P NAMES NATIONAL NATURAL NCHAR NEW NEXT NO NONE
 	NOT NOTHING NOTIFY NOTNULL NOWAIT NULL_P NULLIF
@@ -767,7 +771,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 	QUOTE
 
 	RANGE READ REAL REASSIGN RECHECK RECURSIVE REF REFERENCES REFERENCING
-	REFRESH REINDEX RELATIVE_P RELEASE RENAME REPEATABLE REPLACE REPLICA
+	REFRESH REINDEX RELATIVE_P RELEASE RELOPT RENAME REPEATABLE REPLACE REPLICA
 	RESET RESTART RESTRICT RETRIEVE RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK ROLLUP
 	ROUTINE ROUTINES ROW ROWS RULE
 
@@ -800,9 +804,9 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 
 /* GPDB-added keywords, in alphabetical order */
 %token <keyword>
-	ACTIVE
+	ACTIVE AO_AUX_ONLY
 
-	CONTAINS COORDINATOR CPUSET CPU_RATE_LIMIT
+	CONTAINS COORDINATOR CPUSET CPU_MAX_PERCENT CPU_WEIGHT
 
 	CREATEEXTTABLE
 
@@ -818,7 +822,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 
 	HASH HOST
 
-	IGNORE_P INCLUSIVE INITPLAN
+	IGNORE_P INCLUSIVE INITPLAN IO_LIMIT
 
 	LIST LOG_P
 
@@ -915,13 +919,17 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc AGGREGATE
 			%nonassoc ALSO
 			%nonassoc ALTER
+			%nonassoc AM
+			%nonassoc AO_AUX_ONLY
 			%nonassoc ASSERTION
 			%nonassoc ASSIGNMENT
+			%nonassoc ATTACH
 			%nonassoc BACKWARD
 			%nonassoc BEFORE
 			%nonassoc BEGIN_P
 			%nonassoc BY
 			%nonassoc CACHE
+			%nonassoc CALL
 			%nonassoc CALLED
 			%nonassoc CASCADE
 			%nonassoc CASCADED
@@ -931,6 +939,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc CLASS
 			%nonassoc CLOSE
 			%nonassoc CLUSTER
+			%nonassoc COLUMNS
 			%nonassoc COMMENT
 			%nonassoc COMMIT
 			%nonassoc COMMITTED
@@ -942,10 +951,12 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc CONTENT_P
 			%nonassoc CONTINUE_P
 			%nonassoc CONVERSION_P
+			%nonassoc COORDINATOR
 			%nonassoc COPY
 			%nonassoc COST
 			%nonassoc CPUSET
-			%nonassoc CPU_RATE_LIMIT
+			%nonassoc CPU_MAX_PERCENT
+			%nonassoc CPU_WEIGHT
 			%nonassoc CREATEEXTTABLE
 			%nonassoc CSV
 			%nonassoc CURRENT_P
@@ -962,6 +973,8 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc DELETE_P
 			%nonassoc DELIMITER
 			%nonassoc DELIMITERS
+			%nonassoc DEPENDS
+			%nonassoc DETACH
 			%nonassoc DISABLE_P
 			%nonassoc DOMAIN_P
 			%nonassoc DOUBLE_P
@@ -991,6 +1004,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc FUNCTION
 			%nonassoc GLOBAL
 			%nonassoc GRANTED
+			%nonassoc GROUPING
 			%nonassoc HANDLER
 			%nonassoc HASH
 			%nonassoc HEADER_P
@@ -1001,6 +1015,8 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc IMMEDIATE
 			%nonassoc IMMUTABLE
 			%nonassoc IMPLICIT_P
+			%nonassoc IMPORT_P
+			%nonassoc INCLUDE
 			%nonassoc INCLUDING
 			%nonassoc INCLUSIVE
 			%nonassoc INCREMENT
@@ -1024,13 +1040,15 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc LOAD
 			%nonassoc LOCAL
 			%nonassoc LOCATION
+			%nonassoc LOCKED
 			%nonassoc LOCK_P
+			%nonassoc LOGGED
 			%nonassoc MASTER
 			%nonassoc MATCH
 			%nonassoc MAXVALUE
 			%nonassoc MEMORY_LIMIT
-			%nonassoc MEMORY_SHARED_QUOTA
-			%nonassoc MEMORY_SPILL_RATIO
+			%nonassoc METHOD
+			%nonassoc MIN_COST
 			%nonassoc MINUTE_P
 			%nonassoc MINVALUE
 			%nonassoc MISSING
@@ -1040,6 +1058,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc MOVE
 			%nonassoc NAME_P
 			%nonassoc NAMES
+			%nonassoc NEW
 			%nonassoc NEWLINE
 			%nonassoc NEXT
 			%nonassoc NO
@@ -1052,11 +1071,13 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc OBJECT_P
 			%nonassoc OF
 			%nonassoc OIDS
+			%nonassoc OLD
 			%nonassoc OPTION
 			%nonassoc OPTIONS
 			%nonassoc OTHERS
 			%nonassoc OVER
 			%nonassoc OVERCOMMIT
+			%nonassoc OVERRIDING
 			%nonassoc OWNED
 			%nonassoc OWNER
 			%nonassoc PARALLEL
@@ -1065,13 +1086,16 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc PASSWORD
 			%nonassoc PERCENT
 			%nonassoc PERSISTENTLY
+			%nonassoc POLICY
 			%nonassoc PREPARE
 			%nonassoc PREPARED
 			%nonassoc PRIOR
 			%nonassoc PRIVILEGES
 			%nonassoc PROCEDURAL
 			%nonassoc PROCEDURE
+			%nonassoc PROCEDURES
 			%nonassoc PROTOCOL
+			%nonassoc PUBLICATION
 			%nonassoc QUEUE
 			%nonassoc QUOTE
 			%nonassoc RANDOMLY
@@ -1081,10 +1105,12 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc REASSIGN
 			%nonassoc RECHECK
 			%nonassoc RECURSIVE
+			%nonassoc REFERENCING
 			%nonassoc REINDEX
 			%nonassoc REJECT_P
 			%nonassoc RELATIVE_P
 			%nonassoc RELEASE
+			%nonassoc RELOPT
 			%nonassoc RENAME
 			%nonassoc REPEATABLE
 			%nonassoc REPLACE
@@ -1097,9 +1123,12 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc REVOKE
 			%nonassoc ROLE
 			%nonassoc ROLLBACK
+			%nonassoc ROUTINE
+			%nonassoc ROUTINES
 			%nonassoc RULE
 			%nonassoc SAVEPOINT
 			%nonassoc SCHEMA
+			%nonassoc SCHEMAS
 			%nonassoc SCROLL
 			%nonassoc SEARCH
 			%nonassoc SECOND_P
@@ -1112,6 +1141,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc SHARE
 			%nonassoc SHOW
 			%nonassoc SIMPLE
+			%nonassoc SQL_P
 			%nonassoc SPLIT
 			%nonassoc STABLE
 			%nonassoc START
@@ -1120,10 +1150,13 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc STDIN
 			%nonassoc STDOUT
 			%nonassoc STORAGE
+			%nonassoc STORED
 			%nonassoc SUBPARTITION
+			%nonassoc SUPPORT
 			%nonassoc SYSID
 			%nonassoc SYSTEM_P
 			%nonassoc STRICT_P
+			%nonassoc TABLESAMPLE
 			%nonassoc TABLESPACE
 			%nonassoc TEMP
 			%nonassoc TEMPLATE
@@ -1131,6 +1164,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc THRESHOLD
 			%nonassoc TIES
 			%nonassoc TRANSACTION
+			%nonassoc TRANSFORM
 			%nonassoc TRIGGER
 			%nonassoc TRUNCATE
 			%nonassoc TRUSTED
@@ -1604,25 +1638,29 @@ OptResourceGroupElem:
 					/* was "concurrency" */
 					$$ = makeDefElem("concurrency", (Node *) makeInteger($2), @1);
 				}
-			| CPU_RATE_LIMIT SignedIconst
+			| CPU_MAX_PERCENT SignedIconst
 				{
-					$$ = makeDefElem("cpu_rate_limit", (Node *) makeInteger($2), @1);
+					$$ = makeDefElem("cpu_max_percent", (Node *) makeInteger($2), @1);
+				}
+			| CPU_WEIGHT SignedIconst
+				{
+					$$ = makeDefElem("cpu_weight", (Node *) makeInteger($2), @1);
 				}
 			| CPUSET Sconst
 				{
 					$$ = makeDefElem("cpuset", (Node *) makeString($2), @1);
 				}
-			| MEMORY_SHARED_QUOTA SignedIconst
-				{
-					$$ = makeDefElem("memory_shared_quota", (Node *) makeInteger($2), @1);
-				}
 			| MEMORY_LIMIT SignedIconst
 				{
 					$$ = makeDefElem("memory_limit", (Node *) makeInteger($2), @1);
 				}
-			| MEMORY_SPILL_RATIO SignedIconst
+			| MIN_COST SignedIconst
 				{
-					$$ = makeDefElem("memory_spill_ratio", (Node *) makeInteger($2), @1);
+					$$ = makeDefElem("min_cost", (Node *) makeInteger($2), @1);
+				}
+			| IO_LIMIT Sconst
+				{
+					$$ = makeDefElem("io_limit", (Node *) makeString($2), @1);
 				}
 		;
 
@@ -2910,6 +2948,18 @@ alter_table_cmd:
 					n->def = (Node *) makeInteger($6);
 					$$ = (Node *)n;
 				}
+			/* ALTER TABLE <name> ALTER COLUMN <column> SET ENCODING <coldef> */
+			| ALTER opt_column ColId SET ENCODING definition
+				{
+					ColumnReferenceStorageDirective *c =
+						makeNode(ColumnReferenceStorageDirective);
+					c->column = $3;
+					c->encoding = $6;
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_SetColumnEncoding;
+					n->def = (Node *)c;
+					$$ = (Node *)n;
+				}
 			/* ALTER TABLE <name> ALTER [COLUMN] <colname> SET ( column_parameter = value [, ... ] ) */
 			| ALTER opt_column ColId SET reloptions
 				{
@@ -3241,12 +3291,26 @@ alter_table_cmd:
 					n->def = (Node *) list_make2($3, $4);
 					$$ = (Node *)n;
 				}
-			/* storage only */
+			/* table storage type  or reorganize only */
 			| SET WITH definition
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
-					n->subtype = AT_SetDistributedBy;
-					n->def = (Node *) list_make2($3, NULL);
+					if (isSetWithReorganize(&$3))
+					{
+						n->subtype = AT_SetDistributedBy;
+						n->def = (Node *) list_make2($3, NULL);
+					}
+					else
+					{
+						n->subtype = AT_SetAccessMethod;
+						n->name = greenplumLegacyAOoptions(n->name, &$3);
+						if (!n->name)
+							ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("invalid storage type"),
+								 parser_errposition(@3)));
+						n->def = (Node *) $3;
+					}
 					$$ = (Node *)n;
 				}
 			| alter_table_partition_cmd
@@ -3258,6 +3322,13 @@ alter_table_cmd:
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 					n->subtype = AT_ExpandTable;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> EXPAND PARTITION PREPARE*/
+			| EXPAND PARTITION PREPARE
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_ExpandPartitionTablePrepare;
 					$$ = (Node *)n;
 				}
 			/* ALTER TABLE <name> OF <type_name> */
@@ -3283,6 +3354,38 @@ alter_table_cmd:
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 					n->subtype = AT_ChangeOwner;
 					n->newowner = $3;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> SET ACCESS METHOD <amname> WITH (<reloptions>) */
+			| SET ACCESS METHOD name OptWith
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					char *witham = greenplumLegacyAOoptions(n->name, &$5);
+					n->subtype = AT_SetAccessMethod;
+					n->name = $4;
+					/*
+					 * If there's any legacy AO options specified in the WITH
+					 * clause such as 'appendonly' or 'appendoptimized', it has
+					 * to match with the AM name.
+					 */
+					if (witham) 
+					{
+						if (strlen(witham) != strlen(n->name) || 
+							strncmp(n->name, witham, strlen(n->name)) != 0)
+							ereport(ERROR,
+									(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+									 errmsg("ACCESS METHOD is specified as \"%s\" but "
+										"the WITH option indicates it to be \"%s\"",
+										n->name, witham),
+									 parser_errposition(@5)));
+						else
+							ereport(NOTICE,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("Redundant clauses are used to indicate the access method."),
+									 errhint("Only one of these is needed to indicate access method: the "
+										"SET ACCESS METHOD clause or the options in the WITH clause.")));
+					}
+					n->def = (Node *) $5;
 					$$ = (Node *)n;
 				}
 			/* ALTER TABLE <name> SET TABLESPACE <tablespacename> */
@@ -4233,6 +4336,9 @@ CopyStmt:	COPY opt_binary qualified_name opt_column_list
 						n->options = lappend(n->options, $8);
 					if ($10)
 						n->options = list_concat(n->options, $10);
+					if ($12)
+						n->options = list_concat(n->options, $12);
+
 					$$ = (Node *)n;
 				}
 			| COPY '(' PreparableStmt ')' TO opt_program copy_file_name opt_with copy_options
@@ -4468,6 +4574,7 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->oncommit = $12;
 					n->tablespacename = $13;
 					n->if_not_exists = false;
+					n->gp_style_alter_part = false;
 					n->distributedBy = (DistributedBy *) $14;
 					n->relKind = RELKIND_RELATION;
 
@@ -4498,6 +4605,7 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->oncommit = $15;
 					n->tablespacename = $16;
 					n->if_not_exists = true;
+					n->gp_style_alter_part = false;
 					n->distributedBy = (DistributedBy *) $17;
 					n->relKind = RELKIND_RELATION;
 
@@ -4529,6 +4637,7 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->oncommit = $11;
 					n->tablespacename = $12;
 					n->if_not_exists = false;
+					n->gp_style_alter_part = false;
 					n->distributedBy = (DistributedBy *) $13;
 					n->relKind = RELKIND_RELATION;
 
@@ -4560,6 +4669,7 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->oncommit = $14;
 					n->tablespacename = $15;
 					n->if_not_exists = true;
+					n->gp_style_alter_part = false;
 					n->distributedBy = (DistributedBy *) $16;
 					n->relKind = RELKIND_RELATION;
 
@@ -4591,6 +4701,7 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->oncommit = $13;
 					n->tablespacename = $14;
 					n->if_not_exists = false;
+					n->gp_style_alter_part = false;
 					n->distributedBy = NULL;
 					n->relKind = RELKIND_RELATION;
 
@@ -4622,6 +4733,7 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->oncommit = $16;
 					n->tablespacename = $17;
 					n->if_not_exists = true;
+					n->gp_style_alter_part = false;
 					n->distributedBy = NULL;
 					n->relKind = RELKIND_RELATION;
 
@@ -5004,6 +5116,7 @@ TableLikeClause:
 					TableLikeClause *n = makeNode(TableLikeClause);
 					n->relation = $2;
 					n->options = $3;
+					n->relationOid = InvalidOid;
 					$$ = (Node *)n;
 				}
 		;
@@ -5023,6 +5136,9 @@ TableLikeOption:
 				| INDEXES			{ $$ = CREATE_TABLE_LIKE_INDEXES; }
 				| STATISTICS		{ $$ = CREATE_TABLE_LIKE_STATISTICS; }
 				| STORAGE			{ $$ = CREATE_TABLE_LIKE_STORAGE; }
+				| ENCODING			{ $$ = CREATE_TABLE_LIKE_ENCODING; }
+				| RELOPT			{ $$ = CREATE_TABLE_LIKE_RELOPT; }
+				| AM				{ $$ = CREATE_TABLE_LIKE_AM; }
 				| ALL				{ $$ = CREATE_TABLE_LIKE_ALL; }
 		;
 
@@ -6376,7 +6492,7 @@ OptSingleRowErrorHandling:
 					   (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						errmsg("invalid (ROWS) reject limit. Should be 2 or larger")));
 
-			$$ = (Node *)n;
+			$$ = lappend(NULL, makeDefElem("sreh", (Node *) n, @1));
 		}
 		| /*EMPTY*/		{ $$ = NULL; }
 		;
@@ -6486,7 +6602,7 @@ CreateMatViewStmt:
 
 					$$ = (Node *) ctas;
 				}
-		| CREATE OptNoLog MATERIALIZED VIEW IF_P NOT EXISTS create_mv_target AS SelectStmt opt_with_data
+		| CREATE OptNoLog MATERIALIZED VIEW IF_P NOT EXISTS create_mv_target AS SelectStmt opt_with_data OptDistributedBy
 				{
 					CreateTableAsStmt *ctas = makeNode(CreateTableAsStmt);
 					ctas->query = $10;
@@ -6497,6 +6613,8 @@ CreateMatViewStmt:
 					/* cram additional flags into the IntoClause */
 					$8->rel->relpersistence = $2;
 					$8->skipData = !($11);
+					ctas->into->distributedBy = $12;
+
 					$$ = (Node *) ctas;
 				}
 		;
@@ -9470,7 +9588,7 @@ privilege:	SELECT opt_column_list
  * opt_table.  You're going to get conflicts.
  */
 privilege_target:
-			qualified_name_list
+			qualified_name_list_with_only
 				{
 					PrivTarget *n = (PrivTarget *) palloc(sizeof(PrivTarget));
 					n->targtype = ACL_TARGET_OBJECT;
@@ -9478,7 +9596,7 @@ privilege_target:
 					n->objs = $1;
 					$$ = n;
 				}
-			| TABLE qualified_name_list
+			| TABLE qualified_name_list_with_only
 				{
 					PrivTarget *n = (PrivTarget *) palloc(sizeof(PrivTarget));
 					n->targtype = ACL_TARGET_OBJECT;
@@ -10396,18 +10514,30 @@ common_func_opt_item:
 			| NO SQL_P
 				{
 					$$ = makeDefElem("data_access", (Node *)makeString("none"), @1);
+					ereport(NOTICE,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("specifying \"NO SQL\" acts as no operation.")));
 				}
 			| CONTAINS SQL_P
 				{
 					$$ = makeDefElem("data_access", (Node *)makeString("contains"), @1);
+					ereport(NOTICE,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("specifying \"CONTAINS SQL DATA\" acts as no operation.")));
 				}
 			| READS SQL_P DATA_P
 				{
 					$$ = makeDefElem("data_access", (Node *)makeString("reads"), @1);
+					ereport(NOTICE,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("specifying \"READS SQL DATA\" acts as no operation.")));
 				}
 			| MODIFIES SQL_P DATA_P
 				{
 					$$ = makeDefElem("data_access", (Node *)makeString("modifies"), @1);
+					ereport(NOTICE,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("specifying \"MODIFIES SQL DATA\" acts as no operation.")));
 				}
 			| EXECUTE ON ANY
 				{
@@ -13083,7 +13213,7 @@ cluster_index_specification:
  *
  *****************************************************************************/
 
-VacuumStmt: VACUUM opt_full opt_freeze opt_verbose opt_analyze opt_vacuum_relation_list
+VacuumStmt: VACUUM opt_full opt_freeze opt_verbose opt_analyze opt_ao_aux_only opt_vacuum_relation_list
 				{
 					VacuumStmt *n = makeNode(VacuumStmt);
 					n->options = NIL;
@@ -13099,7 +13229,10 @@ VacuumStmt: VACUUM opt_full opt_freeze opt_verbose opt_analyze opt_vacuum_relati
 					if ($5)
 						n->options = lappend(n->options,
 											 makeDefElem("analyze", NULL, @5));
-					n->rels = $6;
+					if ($6)
+						n->options = lappend(n->options,
+											 makeDefElem("ao_aux_only", NULL, @6));
+					n->rels = $7;
 					n->is_vacuumcmd = true;
 					$$ = (Node *)n;
 				}
@@ -13263,6 +13396,10 @@ opt_vacuum_relation_list:
 			| /*EMPTY*/								{ $$ = NIL; }
 		;
 
+/*GPDB: only vacuum supporting heap tables of given AO table*/
+opt_ao_aux_only:    AO_AUX_ONLY						{ $$ = true; }
+                    | /*EMPTY*/                     { $$ = false; }
+		;
 
 /*****************************************************************************
  *
@@ -13691,13 +13828,25 @@ using_clause:
  *
  *****************************************************************************/
 
-LockStmt:	LOCK_P opt_table relation_expr_list opt_lock opt_nowait
+LockStmt:	LOCK_P opt_table relation_expr_list opt_lock opt_nowait opt_coordinatoronly
 				{
 					LockStmt *n = makeNode(LockStmt);
 
 					n->relations = $3;
 					n->mode = $4;
 					n->nowait = $5;
+					if ($6 != NULL)
+						n->coordinatoronly = true;
+					else
+						n->coordinatoronly = false;
+					if (n->coordinatoronly && n->mode != AccessShareLock)
+					{
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("provided lock mode is not supported for %s", $6),
+							 	errhint("Only ACCESS SHARE mode is supported for %s.", $6),
+								parser_errposition(@4)));
+					}
 					$$ = (Node *)n;
 				}
 		;
@@ -13726,6 +13875,10 @@ opt_nowait_or_skip:
 			| /*EMPTY*/						{ $$ = LockWaitBlock; }
 		;
 
+opt_coordinatoronly: MASTER ONLY					{ $$ = pstrdup("MASTER ONLY"); }
+		| COORDINATOR ONLY				{ $$ = pstrdup("COORDINATOR ONLY"); }
+		| /*EMPTY*/					{ $$ = NULL; }
+		;
 
 /*****************************************************************************
  *
@@ -17554,6 +17707,27 @@ qualified_name_list:
 			| qualified_name_list ',' qualified_name { $$ = lappend($1, $3); }
 		;
 
+qualified_name_list_with_only:
+			qualified_name
+				{
+					$$ = list_make1($1);
+				}
+			| ONLY qualified_name
+				{ 
+					$2->inh = false; 
+					$$ = list_make1($2);
+				}
+			| qualified_name_list_with_only ',' qualified_name
+				{
+					$$ = lappend($1, $3);
+				}
+			| qualified_name_list_with_only ',' ONLY qualified_name
+				{
+					$4->inh = false; 
+					$$ = lappend($1, $4);
+				}
+		;
+
 /*
  * The production for a qualified relation name has to exactly match the
  * production for a qualified func_name, because in a FROM clause we cannot
@@ -17889,6 +18063,7 @@ unreserved_keyword:
 			| ALSO
 			| ALTER
 			| ALWAYS
+			| AM
 			| ASSERTION
 			| ASSIGNMENT
 			| AT
@@ -17928,7 +18103,8 @@ unreserved_keyword:
 			| COPY
 			| COST
 			| CPUSET
-			| CPU_RATE_LIMIT
+			| CPU_MAX_PERCENT
+			| CPU_WEIGHT
 			| CREATEEXTTABLE
 			| CSV
 			| CUBE
@@ -18018,6 +18194,7 @@ unreserved_keyword:
 			| INSERT
 			| INSTEAD
 			| INVOKER
+			| IO_LIMIT
 			| ISOLATION
 			| KEY
 			| LABEL
@@ -18033,6 +18210,7 @@ unreserved_keyword:
 			| LOCATION
 			| LOCK_P
 			| LOCKED
+			| LOG_P
 			| LOGGED
 			| MAPPING
 			| MASTER
@@ -18040,11 +18218,10 @@ unreserved_keyword:
 			| MATERIALIZED
 			| MAXVALUE
 			| MEMORY_LIMIT
-			| MEMORY_SHARED_QUOTA
-			| MEMORY_SPILL_RATIO
 			| METHOD
 			| MINUTE_P
 			| MINVALUE
+			| MIN_COST
 			| MISSING
 			| MODE
 			| MODIFIES
@@ -18116,6 +18293,7 @@ unreserved_keyword:
 			| REJECT_P /* gp */
 			| RELATIVE_P
 			| RELEASE
+			| RELOPT
 			| RENAME
 			| REPEATABLE
 			| REPLACE
@@ -18260,13 +18438,17 @@ PartitionIdentKeyword: ABORT_P
 			| AFTER
 			| AGGREGATE
 			| ALSO
+			| AM
+			| AO_AUX_ONLY
 			| ASSERTION
 			| ASSIGNMENT
+			| ATTACH
 			| BACKWARD
 			| BEFORE
 			| BEGIN_P
 			| BY
 			| CACHE
+			| CALL
 			| CALLED
 			| CASCADE
 			| CASCADED
@@ -18276,6 +18458,7 @@ PartitionIdentKeyword: ABORT_P
 			| CLASS
 			| CLOSE
 			| CLUSTER
+			| COLUMNS
 			| COMMENT
 			| COMMIT
 			| COMMITTED
@@ -18285,10 +18468,12 @@ PartitionIdentKeyword: ABORT_P
 			| CONTAINS
 			| CONTENT_P
 			| CONVERSION_P
+			| COORDINATOR
 			| COPY
 			| COST
 			| CPUSET
-			| CPU_RATE_LIMIT
+			| CPU_MAX_PERCENT
+			| CPU_WEIGHT
 			| CREATEEXTTABLE
 			| CSV
 			| CUBE
@@ -18303,6 +18488,8 @@ PartitionIdentKeyword: ABORT_P
 			| DELETE_P
 			| DELIMITER
 			| DELIMITERS
+			| DEPENDS
+			| DETACH
 			| DISABLE_P
 			| DOMAIN_P
 			| DOUBLE_P
@@ -18329,8 +18516,11 @@ PartitionIdentKeyword: ABORT_P
 			| FORMAT
 			| FORWARD
 			| FUNCTION
+			| GENERATED
 			| GLOBAL
 			| GRANTED
+			| GROUPING
+			| GROUPS
 			| HANDLER
 			| HASH
 			| HEADER_P
@@ -18340,6 +18530,8 @@ PartitionIdentKeyword: ABORT_P
 			| IMMEDIATE
 			| IMMUTABLE
 			| IMPLICIT_P
+			| IMPORT_P
+			| INCLUDE
 			| INCLUDING
 			| INCLUSIVE
 			| INCREMENT
@@ -18363,13 +18555,14 @@ PartitionIdentKeyword: ABORT_P
 			| LOAD
 			| LOCAL
 			| LOCATION
+			| LOCKED
 			| LOCK_P
+			| LOGGED
 			| MASTER
 			| MATCH
 			| MAXVALUE
 			| MEMORY_LIMIT
-			| MEMORY_SHARED_QUOTA
-			| MEMORY_SPILL_RATIO
+			| METHOD
 			| MINVALUE
 			| MISSING
 			| MODE
@@ -18377,6 +18570,7 @@ PartitionIdentKeyword: ABORT_P
 			| MOVE
 			| NAME_P
 			| NAMES
+			| NEW
 			| NEWLINE
 			| NEXT
 			| NO
@@ -18388,11 +18582,13 @@ PartitionIdentKeyword: ABORT_P
 			| OBJECT_P
 			| OF
 			| OIDS
+			| OLD
 			| OPERATOR
 			| OPTION
 			| OPTIONS
 			| OTHERS
 			| OVERCOMMIT
+			| OVERRIDING
 			| OWNED
 			| OWNER
 			| PARALLEL
@@ -18401,6 +18597,7 @@ PartitionIdentKeyword: ABORT_P
 			| PASSWORD
 			| PERCENT
 			| PERSISTENTLY
+			| POLICY
 			| PREPARE
 			| PREPARED
 			| PRESERVE
@@ -18408,16 +18605,20 @@ PartitionIdentKeyword: ABORT_P
 			| PRIVILEGES
 			| PROCEDURAL
 			| PROCEDURE
+			| PROCEDURES
 			| PROTOCOL
+			| PUBLICATION
 			| QUEUE
 			| QUOTE
 			| RANGE
 			| READ
 			| REASSIGN
 			| RECHECK
+			| REFERENCING
 			| REINDEX
 			| RELATIVE_P
 			| RELEASE
+			| RELOPT
 			| RENAME
 			| REPEATABLE
 			| REPLACE
@@ -18425,15 +18626,19 @@ PartitionIdentKeyword: ABORT_P
 			| RESOURCE
 			| RESTART
 			| RESTRICT
+			| RETRIEVE
 			| RETURNS
 			| REVOKE
 			| ROLE
 			| ROLLBACK
 			| ROLLUP
+			| ROUTINE
+			| ROUTINES
 			| ROWS
 			| RULE
 			| SAVEPOINT
 			| SCHEMA
+			| SCHEMAS
 			| SCROLL
 			| SEARCH
 			| SECURITY
@@ -18447,6 +18652,7 @@ PartitionIdentKeyword: ABORT_P
 			| SHOW
 			| SIMPLE
 			| SPLIT
+			| SQL_P
 			| STABLE
 			| START
 			| STATEMENT
@@ -18454,16 +18660,20 @@ PartitionIdentKeyword: ABORT_P
 			| STDIN
 			| STDOUT
 			| STORAGE
+			| STORED
 			| STRICT_P
 			| SUBPARTITION
+			| SUPPORT
 			| SYSID
 			| SYSTEM_P
+			| TABLESAMPLE
 			| TEMP
 			| TEMPLATE
 			| TEMPORARY
 			| THRESHOLD
 			| TIES
 			| TRANSACTION
+			| TRANSFORM
 			| TRIGGER
 			| TRUNCATE
 			| TRUSTED
@@ -18526,6 +18736,7 @@ PartitionIdentKeyword: ABORT_P
 			| LOG_P
 			| OUTER_P
 			| VERBOSE
+			| MIN_COST
 			;
 
 /* Column identifier --- keywords that can be column, table, etc names.
@@ -18604,7 +18815,8 @@ col_name_keyword:
  * - thomas 2000-11-28
  */
 type_func_name_keyword:
-			  AUTHORIZATION
+            AO_AUX_ONLY
+			| AUTHORIZATION
 			| BINARY
 			| COLLATION
 			| CONCURRENTLY
@@ -18619,7 +18831,6 @@ type_func_name_keyword:
 			| JOIN
 			| LEFT
 			| LIKE
-			| LOG_P
 			| NATURAL
 			| NOTNULL
 			| OUTER_P
@@ -19044,7 +19255,7 @@ makeOrderedSetArgs(List *directargs, List *orderedargs,
 				   core_yyscan_t yyscanner)
 {
 	FunctionParameter *lastd = (FunctionParameter *) llast(directargs);
-	int			ndirectargs;
+	Value	   *ndirectargs;
 
 	/* No restriction unless last direct arg is VARIADIC */
 	if (lastd->mode == FUNC_PARAM_VARIADIC)
@@ -19068,10 +19279,10 @@ makeOrderedSetArgs(List *directargs, List *orderedargs,
 	}
 
 	/* don't merge into the next line, as list_concat changes directargs */
-	ndirectargs = list_length(directargs);
+	ndirectargs = makeInteger(list_length(directargs));
 
 	return list_make2(list_concat(directargs, orderedargs),
-					  makeInteger(ndirectargs));
+					  ndirectargs);
 }
 
 /* insertSelectOptions()
@@ -19606,6 +19817,27 @@ makeRecursiveViewSelect(char *relname, List *aliases, Node *query)
 	return (Node *) s;
 }
 
+static bool
+isSetWithReorganize(List **options)
+{
+	ListCell *lc;
+	foreach (lc, *options)
+	{
+		DefElem *elem = lfirst(lc);
+
+		if (strcmp(elem->defname, "reorganize") == 0)
+		{
+			if (list_length(*options) == 1)
+				return true;
+			else
+				ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("reorganize isn't supported with other options in SET WITH")));
+		}
+	}
+	return false;
+}
+
 /*
  * Greenplum: a thin wax off layer to keep compatibility with the legacy syntax
  * for appendoptimized options. Before the introduction of the tableam in
@@ -19660,24 +19892,6 @@ greenplumLegacyAOoptions(const char *accessMethod, List **options)
 			amendedOptions = lappend(amendedOptions, elem);
 	}
 	*options = amendedOptions;
-
-	/* GPDB_12_MERGE_FIXME: during the development of the ao_row/column tableam we
-	 * need to have this layer turned off. When removing this fixme, make
-	 * certain that any sanity checks on the options are also introduced if
-	 * needed. Such examples can be:
-	 *
-	 *  if (strcmp(elem->defname, "appendoptimized") == 0 ||
-	 *      strcmp(elem->defname, "appendonly") == 0)
-	 *  {
-	 *      if ((strVal(elem->arg), "true") == 0)
-	 *   	{ options for true }
-	 *   	else if ((strVal(elem->arg), "false") == 0)
-	 *   	{ options for false }
-	 *   	else
-	 *   	{ ereport(....
-	 *  }
-	 *
-	 */
 
 	if (!appendoptimized && is_column_oriented_found)
 		ereport(ERROR,

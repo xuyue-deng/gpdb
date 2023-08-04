@@ -90,7 +90,7 @@ ISCONFIG=$(GPPGDIR)/GNUmakefile
 ## On these platforms, we do the full build including the server. On other
 ## platforms, we do a client-only build.
 ##
-SERVER_PLATFORMS=rhel7_x86_64 rhel6_x86_64 rhel8_x86_64 linux_x86_64
+SERVER_PLATFORMS=rhel7_x86_64 rhel6_x86_64 rhel8_x86_64 rocky8_x86_64 ol8_x86_64 linux_x86_64
 
 #---------------------------------------------------------------------
 # Compiler options
@@ -120,11 +120,14 @@ DEFPORT=5432
 
 ORCA_CONFIG=--enable-orca
 
-rhel6_x86_64_CONFIGFLAGS=--with-quicklz --with-gssapi --enable-mapreduce --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap
-rhel7_x86_64_CONFIGFLAGS=--with-quicklz --with-gssapi --enable-mapreduce --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap
-rhel8_x86_64_CONFIGFLAGS=--with-quicklz --with-gssapi --enable-mapreduce --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap
-ubuntu18.04_x86_64_CONFIGFLAGS=--with-quicklz --with-gssapi --enable-mapreduce --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap
-sles12_x86_64_CONFIGFLAGS=--with-quicklz --with-gssapi --enable-mapreduce --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap
+rhel6_x86_64_CONFIGFLAGS=--with-gssapi --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap --with-uuid=e2fs --with-llvm
+rhel7_x86_64_CONFIGFLAGS=--with-gssapi --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap --with-uuid=e2fs --with-llvm
+rhel8_x86_64_CONFIGFLAGS=--with-gssapi --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap --with-uuid=e2fs --with-llvm
+rocky8_x86_64_CONFIGFLAGS=--with-gssapi --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap --with-uuid=e2fs --with-llvm
+rocky9_x86_64_CONFIGFLAGS=--with-gssapi --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap --with-uuid=e2fs
+ol8_x86_64_CONFIGFLAGS=--with-gssapi --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap --with-uuid=e2fs --with-llvm
+ubuntu18.04_x86_64_CONFIGFLAGS=--with-gssapi --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap --with-uuid=e2fs --with-llvm
+sles12_x86_64_CONFIGFLAGS=--with-gssapi --enable-orafce --enable-ic-proxy ${ORCA_CONFIG} --enable-gpcloud --with-libxml --with-openssl --with-pam --with-ldap --with-uuid=e2fs --with-llvm
 BLD_CONFIGFLAGS=$($(BLD_ARCH)_CONFIGFLAGS)
 
 CONFIGFLAGS=$(strip $(BLD_CONFIGFLAGS) --with-pgport=$(DEFPORT) $(BLD_DEPLOYMENT_SETTING))
@@ -135,7 +138,7 @@ endif
 
 
 ifneq (false, ${PG_LANG})
-CONFIGFLAGS+= --with-perl --with-python PYTHON=python3
+CONFIGFLAGS+= --with-perl --with-python PYTHON=python3.9
 ifdef TCL_CFG
 CONFIGFLAGS+= --with-tcl-config=${TCL_CFG}
 endif
@@ -211,7 +214,7 @@ perl_archlibexp:=$(shell perl -MConfig -e 'print $$Config{archlibexp}')
 # set default build steps
 define BUILD_STEPS
 	@$(MAKE) -C $(BUILDDIR)/src/backend generated-headers
-	cd $(BUILDDIR) && PYGRESQL_LDFLAGS='-Wl,-rpath,\$$$$ORIGIN/../../../lib -Wl,--enable-new-dtags' QUICKLZ_LDFLAGS='-Wl,-rpath,\$$$$ORIGIN/../../lib -Wl,--enable-new-dtags' $(MAKE) $(PARALLEL_MAKE_OPTS) install
+	cd $(BUILDDIR) && $(MAKE) $(PARALLEL_MAKE_OPTS) install
 	cd $(BUILDDIR)/src/pl/plpython && $(MAKE) clean && echo 'LDFLAGS += -Wl,-rpath,\$$$$ORIGIN/../../ext/python/lib/ -Wl,--enable-new-dtags' >> Makefile && $(MAKE) $(PARALLEL_MAKE_OPTS) install && cd $(BUILDDIR)
 	cd $(BUILDDIR)/src/pl/plperl && $(MAKE) clean && echo "LDFLAGS += -Wl,-rpath,$(perl_archlibexp)/CORE -Wl,--enable-new-dtags" >> GNUmakefile && echo "LDFLAGS_SL += -Wl,-rpath,$(perl_archlibexp)/CORE -Wl,--enable-new-dtags" >> GNUmakefile && $(MAKE) $(PARALLEL_MAKE_OPTS) install && cd $(BUILDDIR)
 	#@$(MAKE) greenplum_path INSTLOC=$(INSTLOC)
@@ -247,7 +250,6 @@ define BUILD_STEPS
 	cp -p $(GPMGMT)/bin/gpload $(INSTLOC)/bin/gpload
 	cp -p $(GPMGMT)/bin/gpload.py $(INSTLOC)/bin/gpload.py
 	$(MAKE) copylibs INSTLOC=$(INSTLOC)
-	cd $(GPMGMT)/bin && $(MAKE) pygresql INSTLOC=$(INSTLOC)
 	$(MAKE) clients INSTLOC=$(INSTLOC) CLIENTSINSTLOC=$(CLIENTSINSTLOC)
 endef
 endif
@@ -341,7 +343,6 @@ CLIENTS_HOME_DIR=$(BLD_HOME)
 endif
 CLIENTSINSTLOC=$(CLIENTS_HOME_DIR)/greenplum-clients
 CLIENTSINSTLOC_BIN=$(CLIENTSINSTLOC)/bin
-CLIENTSINSTLOC_BINEXT=$(CLIENTSINSTLOC)/bin/ext/
 CLIENTSINSTLOC_EXT=$(CLIENTSINSTLOC)/ext
 CLIENTSINSTLOC_LIB=$(CLIENTSINSTLOC)/lib
 CLIENTSINSTLOC_LIB_PWARE=$(CLIENTSINSTLOC)/lib/pware
@@ -365,15 +366,6 @@ define tmpCLIENTS_FILESET_BIN
 endef
 CLIENTS_FILESET_BIN = $(strip $(tmpCLIENTS_FILESET_BIN))
 
-# pg.py, pgdb.py, _pg.so are from pygresql which does not install into a single module
-define tmpCLIENTS_FILESET_BINEXT
-	pg.py
-	pgdb.py
-	_pg*.so
-	yaml
-endef
-CLIENTS_FILESET_BINEXT = $(strip $(tmpCLIENTS_FILESET_BINEXT))
-
 BLD_PYTHON_FILESET=.
 
 BLD_OS:=$(shell uname -s)
@@ -388,6 +380,8 @@ ifeq "$(MPP_ARCH)" ""
 rhel6_x86_64_MPP_ARCH=RHEL6-x86_64
 rhel7_x86_64_MPP_ARCH=RHEL7-x86_64
 rhel8_x86_64_MPP_ARCH=RHEL8-x86_64
+rocky8_x86_64_MPP_ARCH=ROCKY8-x86_64
+ol8_x86_64_MPP_ARCH=OL8-x86_64
 ifneq "$($(BLD_ARCH)_MPP_ARCH)" ""
 export MPP_ARCH=$($(BLD_ARCH)_MPP_ARCH)
 else
@@ -411,8 +405,6 @@ else
 	# ---- copy GPDB fileset ----
 	mkdir -p $(CLIENTSINSTLOC_BIN)
 	(cd $(INSTLOC)/bin/ && $(TAR) cf - $(CLIENTS_FILESET_BIN)) | (cd $(CLIENTSINSTLOC_BIN)/ && $(TAR) xpf -)$(check_pipe_for_errors)
-	mkdir -p $(CLIENTSINSTLOC_BINEXT)
-	(cd $(GPMGMT)/bin/ext/ && $(TAR) cf - $(CLIENTS_FILESET_BINEXT)) | (cd $(CLIENTSINSTLOC_BINEXT)/ && $(TAR) xpf -)$(check_pipe_for_errors)
 ifneq "$(PYTHONHOME)" ""
 	mkdir -p $(CLIENTSINSTLOC_EXT)/python
 	(cd $(PYTHONHOME) && $(TAR) cf - $(BLD_PYTHON_FILESET)) | (cd $(CLIENTSINSTLOC_EXT)/python/ && $(TAR) xpf -)$(check_pipe_for_errors)
@@ -498,7 +490,6 @@ SET_VERSION_SCRIPTS = \
 	lib/python/gppylib/programs/clsHostCacheLookup.py \
 	lib/python/gppylib/programs/clsRecoverSegment.py \
 	lib/python/gppylib/programs/clsSystemState.py \
-	lib/python/gppylib/programs/gppkg.py \
 	lib/python/gppylib/programs/kill.py \
 	lib/python/gppylib/mainUtils.py \
 	$(NULL)

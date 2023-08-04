@@ -235,8 +235,9 @@ CJoinCardinalityTest::EresUnittest_Join()
 			CWStringConst str(GPOS_WSZ_LIT("col"));
 			// create column references for grouping columns
 			(void) col_factory->PcrCreate(
-				pmdtypeint4, default_type_modifier, nullptr, ul /* attno */,
-				false /*IsNullable*/, id, CName(&str), false /*IsDistCol*/, 0);
+				pmdtypeint4, default_type_modifier, true /*mark_as_used*/,
+				nullptr, ul /* attno */, false /*IsNullable*/, id, CName(&str),
+				false /*IsDistCol*/, false);
 		}
 	}
 	cols->Release();

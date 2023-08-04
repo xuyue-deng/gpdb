@@ -33,6 +33,7 @@
 #include "catalog/objectaccess.h"
 #include "catalog/pg_sequence.h"
 #include "catalog/pg_type.h"
+#include "commands/async.h"
 #include "commands/defrem.h"
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
@@ -180,6 +181,14 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
 		RangeVarGetAndCheckCreationNamespace(seq->sequence, NoLock, &seqoid);
 		if (OidIsValid(seqoid))
 		{
+			/*
+			 * If we are in an extension script, insist that the pre-existing
+			 * object be a member of the extension, to avoid security risks.
+			 */
+			ObjectAddressSet(address, RelationRelationId, seqoid);
+			checkMembershipInCurrentExtension(&address);
+
+			/* OK to skip */
 			ereport(NOTICE,
 					(errcode(ERRCODE_DUPLICATE_TABLE),
 					 errmsg("relation \"%s\" already exists, skipping",
@@ -245,6 +254,7 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
 	stmt->if_not_exists = seq->if_not_exists;
 	stmt->relKind = RELKIND_SEQUENCE;
 	stmt->ownerid = GetUserId();
+	stmt->gp_style_alter_part = false;
 
 	address = DefineRelation(stmt, RELKIND_SEQUENCE, seq->ownerId, NULL, NULL,
 							 false, /* dispatch */
@@ -1304,7 +1314,7 @@ init_sequence_internal(Oid _relid, SeqTable *p_elm, Relation *p_rel,
 	 * discard any cached-but-unissued values.  We do not touch the currval()
 	 * state, however.
 	 */
-	if (seqrel->rd_rel->relfilenode != elm->filenode && called_from_dispatcher)
+	if (seqrel->rd_rel->relfilenode != elm->filenode)
 	{
 		elm->filenode = seqrel->rd_rel->relfilenode;
 		elm->cached = elm->last;
@@ -1784,12 +1794,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 	}
 	else if (isInit)
 	{
-		/*
-		 * PostgreSQL default value is 1, GPDB privately bump up to 20.
-		 * If a sequence in UDF, QE executor need to apply sequence value from QD.
-		 * Frequent sequence application is network bottleneck for query execution.
-		 */
-		seqform->seqcache = 20;
+		seqform->seqcache = SEQ_CACHE_DEFAULT;
 	}
 }
 
@@ -2122,7 +2127,7 @@ seq_mask(char *page, BlockNumber blkno)
 /*
  * CDB: forward a nextval request from qExec to the QD
  */
-void
+static void
 cdb_sequence_nextval_qe(Relation	seqrel,
 						int64   *plast,
 						int64   *pcached,
@@ -2151,11 +2156,7 @@ cdb_sequence_nextval_qe(Relation	seqrel,
 	 */
 	char payload[128];
 	snprintf(payload, sizeof(payload), "%d:%d", dbid, seq_oid);
-	pq_beginmessage(&buf, 'A');
-	pq_sendint(&buf, gp_session_id, sizeof(int32));
-	pq_sendstring(&buf, "nextval"); /* channel */
-	pq_sendstring(&buf, payload);
-	pq_endmessage(&buf);
+	NotifyMyFrontEnd("nextval", payload, gp_session_id);
 	pq_flush();
 
 	/*

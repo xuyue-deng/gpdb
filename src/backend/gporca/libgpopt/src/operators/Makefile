@@ -32,7 +32,7 @@ OBJS        = CExpression.o \
               CLogicalDynamicGet.o \
               CLogicalDynamicGetBase.o \
               CLogicalDynamicIndexGet.o \
-              CLogicalExternalGet.o \
+              CLogicalForeignGet.o \
               CLogicalFullOuterJoin.o \
               CLogicalGbAgg.o \
               CLogicalGbAggDeduplicate.o \
@@ -62,11 +62,10 @@ OBJS        = CExpression.o \
               CLogicalLeftSemiJoin.o \
               CLogicalLimit.o \
               CLogicalMaxOneRow.o \
+              CLogicalDynamicForeignGet.o \
               CLogicalNAryJoin.o \
-              CLogicalPartitionSelector.o \
               CLogicalProject.o \
               CLogicalRightOuterJoin.o \
-              CLogicalRowTrigger.o \
               CLogicalSelect.o \
               CLogicalSequence.o \
               CLogicalSequenceProject.o \
@@ -90,10 +89,11 @@ OBJS        = CExpression.o \
               CPhysicalConstTableGet.o \
               CPhysicalDML.o \
               CPhysicalDynamicBitmapTableScan.o \
+              CPhysicalDynamicIndexOnlyScan.o \
               CPhysicalDynamicIndexScan.o \
               CPhysicalDynamicScan.o \
               CPhysicalDynamicTableScan.o \
-              CPhysicalExternalScan.o \
+              CPhysicalForeignScan.o \
               CPhysicalFilter.o \
               CPhysicalFullMergeJoin.o \
               CPhysicalHashAgg.o \
@@ -120,11 +120,11 @@ OBJS        = CExpression.o \
               CPhysicalMotionHashDistribute.o \
               CPhysicalMotionRandom.o \
               CPhysicalMotionRoutedDistribute.o \
+              CPhysicalDynamicForeignScan.o \
               CPhysicalNLJoin.o \
               CPhysicalParallelUnionAll.o \
               CPhysicalPartitionSelector.o \
               CPhysicalRightOuterHashJoin.o \
-              CPhysicalRowTrigger.o \
               CPhysicalScalarAgg.o \
               CPhysicalScan.o \
               CPhysicalSequence.o \
@@ -147,6 +147,7 @@ OBJS        = CExpression.o \
               CScalarArrayCoerceExpr.o \
               CScalarArrayRef.o \
               CScalarArrayRefIndexList.o \
+              CScalarValuesList.o \
               CScalarAssertConstraint.o \
               CScalarAssertConstraintList.o \
               CScalarBitmapBoolOp.o \
@@ -173,6 +174,7 @@ OBJS        = CExpression.o \
               CScalarOp.o \
               CScalarProjectElement.o \
               CScalarProjectList.o \
+              CScalarSortGroupClause.o \
               CScalarSubquery.o \
               CScalarSubqueryAll.o \
               CScalarSubqueryAny.o \
@@ -182,7 +184,9 @@ OBJS        = CExpression.o \
               CScalarSwitchCase.o \
               CScalarWindowFunc.o \
               CStrictHashedDistributions.o \
-              CWindowPreprocessor.o
+              CWindowPreprocessor.o \
+              COrderedAggPreprocessor.o \
+              CLeftJoinPruningPreprocessor.o
 
 include $(top_srcdir)/src/backend/common.mk
 

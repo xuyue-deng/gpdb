@@ -488,11 +488,6 @@ generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,
 	 * SegmentGeneral, the result of the join may end up having a different
 	 * locus.
 	 *
-	 * GPDB_96_MERGE_FIXME: On master, before the merge, more complicated
-	 * logic was added in commit ad6a6067d9 to make the loci on the WorkTableScan
-	 * and the RecursiveUnion correct. That was largely reverted as part of the
-	 * merge, and things seem to be working with this much simpler thing, but
-	 * I'm not sure if the logic is 100% correct now.
 	 */
 	if (CdbPathLocus_IsSegmentGeneral(lpath->locus))
 	{
@@ -592,7 +587,6 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	List	   *tlist_list;
 	List	   *tlist;
 	Path	   *path;
-	GpSetOpType optype = PSETOP_NONE; /* CDB */
 
 	/*
 	 * If plain UNION, tell children to fetch all tuples.
@@ -656,31 +650,11 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	result_rel->reltarget = create_pathtarget(root, tlist);
 	result_rel->consider_parallel = consider_parallel;
 
-
-	/* GPDB_96_MERGE_FIXME: We should use the new pathified upper planner
-	 * infrastructure for this. I think we should create multiple Paths,
-	 * representing different kinds of PSETOP_* implementations, and
-	 * let the "add_path()" choose the cheapest one.
-	 */
-	/* CDB: Decide on approach, condition argument plans to suit. */
-	if ( Gp_role == GP_ROLE_DISPATCH )
-	{
-		optype = choose_setop_type(pathlist);
-		adjust_setop_arguments(root, pathlist, tlist_list, optype);
-	}
-	else if (Gp_role == GP_ROLE_UTILITY ||
-		Gp_role == GP_ROLE_EXECUTE) /* MPP-2928 */
-	{
-		optype = PSETOP_SEQUENTIAL_QD;
-	}
-
 	/*
 	 * Append the child results together.
 	 */
 	path = (Path *) create_append_path(root, result_rel, pathlist, NIL,
 									   NIL, NULL, 0, false, NIL, -1);
-	// GPDB_96_MERGE_FIXME: Where should this go now?
-	//mark_append_locus(plan, optype); /* CDB: Mark the plan result locus. */
 
 	/*
 	 * For UNION ALL, we just need the Append path.  For UNION, need to add
@@ -688,7 +662,7 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	 */
 	if (!op->all)
 	{
-		if ( optype == PSETOP_PARALLEL_PARTITIONED )
+		if (CdbPathLocus_IsPartitioned(path->locus))
 		{
 			/* CDB: Hash motion to collocate non-distinct tuples. */
 			path = make_motion_hash_all_targets(root, path, tlist);
@@ -848,39 +822,6 @@ generate_nonunion_paths(SetOperationStmt *op, PlannerInfo *root,
 			|| Gp_role == GP_ROLE_EXECUTE ) /* MPP-2928 */
 	{
 		optype = PSETOP_SEQUENTIAL_QD;
-	}
-
-	if ( optype == PSETOP_PARALLEL_PARTITIONED )
-	{
-		/*
-		 * CDB: Collocate non-distinct tuples prior to sort or hash. We must
-		 * put the Redistribute nodes below the Append, otherwise we lose
-		 * the order of the firstFlags.
-		 */
-		ListCell   *pathcell;
-		ListCell   *tlistcell;
-		List	   *newpathlist = NIL;
-
-		forboth(pathcell, pathlist, tlistcell, tlist_list)
-		{
-			Path	   *subpath = (Path *) lfirst(pathcell);
-			List	   *subtlist = (List *) lfirst(tlistcell);
-#if 0
-			/* GPDB_96_MERGE_FIXME */
-			/*
-			 * If the subplan already has a Motion at the top, peel it off
-			 * first, so that we don't have a Motion on top of a Motion.
-			 * That would be silly. I wish we could be smarter and not
-			 * create such a Motion in the first place, but it's too late
-			 * for that here.
-			 */
-			while (IsA(subpath, Motion))
-				subpath = subpath->lefttree;
-#endif
-			newpathlist = lappend(newpathlist,
-								  make_motion_hash_all_targets(root, subpath, subtlist));
-		}
-		pathlist = newpathlist;
 	}
 
 	/*
@@ -1172,17 +1113,6 @@ choose_hashed_setop(PlannerInfo *root, List *groupClauses,
 	/*
 	 * Don't do it if it doesn't look like the hashtable will fit into
 	 * work_mem.
-	 *
-	 * GPDB: In other places where we are building a Hash Aggregate, we use
-	 * calcHashAggTableSizes(), which takes into account that in GPDB, a Hash
-	 * Aggregate can spill to disk. We must *not* do that here, because we
-	 * might be building a Hashed SetOp, not a Hash Aggregate. A Hashed SetOp
-	 * uses the upstream hash table implementation unmodified, and cannot
-	 * spill.
-	 * FIXME: It's a bit lame that Hashed SetOp cannot spill to disk. And it's
-	 * even more lame that we don't account the spilling correctly, if we are
-	 * in fact constructing a Hash Aggregate. A UNION is implemented with a
-	 * Hash Aggregate, only INTERSECT and EXCEPT use Hashed SetOp.
 	 */
 	hashentrysize = MAXALIGN(input_path->pathtarget->width) + MAXALIGN(SizeofMinimalTupleHeader);
 
@@ -1330,13 +1260,9 @@ generate_setop_tlist(List *colTypes, List *colCollations,
 		 * will reach the executor without any further processing.
 		 */
 		if (exprCollation(expr) != colColl)
-		{
-			expr = (Node *) makeRelabelType((Expr *) expr,
-											exprType(expr),
-											exprTypmod(expr),
-											colColl,
-											COERCE_IMPLICIT_CAST);
-		}
+			expr = applyRelabelType(expr,
+									exprType(expr), exprTypmod(expr), colColl,
+									COERCE_IMPLICIT_CAST, -1, false);
 
 		tle = makeTargetEntry((Expr *) expr,
 							  (AttrNumber) resno++,

@@ -153,7 +153,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
      * CDB: Get partitioning key info for distributed relation.
      */
     rel->cdbpolicy = RelationGetPartitioningKey(relation);
-	rel->amhandler = relation->rd_amhandler;
+	rel->relam = relation->rd_rel->relam;
 
 	/*
 	 * Estimate relation size --- unless it's an inheritance parent, in which
@@ -189,6 +189,16 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 		List	   *indexoidlist;
 		LOCKMODE	lmode;
 		ListCell   *l;
+
+		/*
+		 * GPDB needs to get AO relation version from pg_appendonly catalog to
+		 * determine whether enabling IndexOnlyScan on AO or not.
+		 * GPDB supports index-only scan on AO starting from AORelationVersion_GP7.
+		 */
+		bool enable_ios_ao = false;
+		if (RelationIsAppendOptimized(relation) &&
+			AORelationVersion_Validate(relation, AORelationVersion_GP7))
+			enable_ios_ao = true;
 
 		indexoidlist = RelationGetIndexList(relation);
 
@@ -274,7 +284,12 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			for (i = 0; i < ncolumns; i++)
 			{
 				info->indexkeys[i] = index->indkey.values[i];
-				info->canreturn[i] = index_can_return(indexRelation, i + 1);
+
+				/* GPDB: This AO table might not have met the requirement for IOScan. */
+				if (RelationIsAppendOptimized(relation) && !enable_ios_ao)
+					info->canreturn[i] = false;
+				else
+					info->canreturn[i] = index_can_return(indexRelation, i + 1);
 			}
 
 			for (i = 0; i < nkeycolumns; i++)
@@ -296,6 +311,8 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			info->amhasgettuple = (amroutine->amgettuple != NULL);
 			info->amhasgetbitmap = amroutine->amgetbitmap != NULL &&
 				relation->rd_tableam->scan_bitmap_next_block != NULL;
+			info->amcanmarkpos = (amroutine->ammarkpos != NULL &&
+								  amroutine->amrestrpos != NULL);
 			info->amcostestimate = amroutine->amcostestimate;
 			Assert(info->amcostestimate != NULL);
 
@@ -611,7 +628,12 @@ cdb_estimate_rel_size(RelOptInfo   *relOptInfo,
 	 * pages added since the last VACUUM are most likely not marked
 	 * all-visible.  But costsize.c wants it converted to a fraction.
 	 */
-	if (relallvisible == 0 || curpages <= 0)
+	if (RelationIsAppendOptimized(rel))
+	{
+		/* see appendonly_estimate_rel_size()/aoco_estimate_rel_size() */
+		*allvisfrac = 1;
+	}
+	else if (relallvisible == 0 || curpages <= 0)
 		*allvisfrac = 0;
 	else if ((double) relallvisible >= curpages)
 		*allvisfrac = 1;
@@ -643,9 +665,12 @@ cdb_estimate_partitioned_numtuples(Relation rel)
 	if (rel->rd_rel->reltuples > 0)
 		return rel->rd_rel->reltuples;
 
-	inheritors = find_all_inheritors(RelationGetRelid(rel),
-									 AccessShareLock,
-									 NULL);
+	// To avoid blocking concurrent transactions on leaf partitions
+	// throughout the entire transition, we refrain from acquiring locks on
+	// the leaf partitions. Instead, we acquire locks only on the
+	// partitions that need to be scanned when ORCA writes the plan,
+	// although it may lead to less accurate stats.
+	inheritors = find_all_inheritors(RelationGetRelid(rel), NoLock, NULL);
 	totaltuples = 0;
 	foreach(lc, inheritors)
 	{
@@ -654,9 +679,14 @@ cdb_estimate_partitioned_numtuples(Relation rel)
 		double		childtuples;
 
 		if (childid != RelationGetRelid(rel))
-			childrel = try_table_open(childid, NoLock, false);
+			childrel = RelationIdGetRelation(childid);
 		else
 			childrel = rel;
+
+		// If childrel is NULL, continue by assuming the child relation
+		// has 0 tuples.
+		if (childrel == NULL)
+			continue;
 
 		childtuples = childrel->rd_rel->reltuples;
 
@@ -687,6 +717,57 @@ cdb_estimate_partitioned_numtuples(Relation rel)
 			heap_close(childrel, NoLock);
 	}
 	return totaltuples;
+}
+
+/*
+ * Get the total pages of a partitioned table, including all partitions.
+ *
+ * Only used with ORCA, currently.
+ */
+PageEstimate
+cdb_estimate_partitioned_numpages(Relation rel)
+{
+	List	   *inheritors;
+	ListCell   *lc;
+
+	PageEstimate estimate = {
+		.totalpages = rel->rd_rel->relpages,
+		.totalallvisiblepages = rel->rd_rel->relallvisible
+	};
+
+	if (estimate.totalpages > 0)
+		return estimate;
+
+	// To avoid blocking concurrent transactions on leaf partitions
+	// throughout the entire transition, we refrain from acquiring locks on
+	// the leaf partitions. Instead, we acquire locks only on the
+	// partitions that need to be scanned when ORCA writes the plan,
+	// although it may lead to less accurate stats.
+	inheritors = find_all_inheritors(RelationGetRelid(rel),
+									 NoLock,
+									 NULL);
+	foreach(lc, inheritors)
+	{
+		Oid			childid = lfirst_oid(lc);
+		Relation	childrel;
+
+		if (childid != RelationGetRelid(rel))
+			childrel = RelationIdGetRelation(childid);
+		else
+			childrel = rel;
+
+		// If childrel is NULL, continue by assuming the child relation
+		// has 0 pages.
+		if (childrel == NULL)
+			continue;
+
+		estimate.totalpages += childrel->rd_rel->relpages;
+		estimate.totalallvisiblepages += childrel->rd_rel->relallvisible;
+
+		if (childrel != rel)
+			heap_close(childrel, NoLock);
+	}
+	return estimate;
 }
 
 /*
@@ -1515,6 +1596,79 @@ get_relation_constraints(PlannerInfo *root,
 	table_close(relation, NoLock);
 
 	return result;
+}
+
+/*
+ * GetExtStatisticsName
+ *		Retrieve the name of an extended statistic object
+ */
+char *
+GetExtStatisticsName(Oid statOid)
+{
+	Form_pg_statistic_ext staForm;
+	HeapTuple	htup;
+
+	htup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statOid));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "cache lookup failed for statistics object %u", statOid);
+
+	staForm = (Form_pg_statistic_ext) GETSTRUCT(htup);
+	ReleaseSysCache(htup);
+	return NameStr(staForm->stxname);
+}
+
+/*
+ *	GetExtStatisticsKinds
+ *
+ * Retrieve the kinds of an extended statistic object
+ */
+List *
+GetExtStatisticsKinds(Oid statOid)
+{
+	Form_pg_statistic_ext staForm;
+	HeapTuple	htup;
+	Datum		datum;
+	bool		isnull;
+	ArrayType  *arr;
+	char	   *enabled;
+
+	List	  *types = NULL;
+	int			i;
+
+	htup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statOid));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "cache lookup failed for statistics object %u", statOid);
+
+	staForm = (Form_pg_statistic_ext) GETSTRUCT(htup);
+
+	datum = SysCacheGetAttr(STATEXTOID, htup,
+							Anum_pg_statistic_ext_stxkind, &isnull);
+	arr = DatumGetArrayTypeP(datum);
+	if (ARR_NDIM(arr) != 1 ||
+		ARR_HASNULL(arr) ||
+		ARR_ELEMTYPE(arr) != CHAROID)
+		elog(ERROR, "stxkind is not a 1-D char array");
+	enabled = (char *) ARR_DATA_PTR(arr);
+	for (i = 0; i < ARR_DIMS(arr)[0]; i++)
+	{
+		types = lappend_int(types, (int) enabled[i]);
+	}
+
+	ReleaseSysCache(htup);
+
+	return types;
+}
+
+/*
+ * GetRelationExtStatistics
+ *		GPDB: Interface to get_relation_statistics.
+ *
+ * Used by ORCA to access function without PLANNER objects (e.g. RelOptInfo).
+ */
+List *
+GetRelationExtStatistics(Relation relation)
+{
+	return get_relation_statistics(NULL, relation);
 }
 
 /*

@@ -19,16 +19,16 @@
 from gppylib.mainUtils import *
 
 from optparse import OptionGroup
-import os, sys, signal, time
+import glob, os, sys, signal, shutil, time
 from contextlib import closing
 
 from gppylib import gparray, gplog, userinput, utils
 from gppylib.util import gp_utils
 from gppylib.commands import gp, pg, unix
-from gppylib.commands.base import Command, WorkerPool
+from gppylib.commands.base import Command, WorkerPool, REMOTE
 from gppylib.db import dbconn
 from gppylib.gpparseopts import OptParser, OptChecker
-from gppylib.operations.detect_unreachable_hosts import get_unreachable_segment_hosts
+from gppylib.operations.detect_unreachable_hosts import get_unreachable_segment_hosts, update_unreachable_flag_for_segments
 from gppylib.operations.startSegments import *
 from gppylib.operations.buildMirrorSegments import *
 from gppylib.operations.rebalanceSegments import GpSegmentRebalanceOperation
@@ -46,27 +46,6 @@ from gppylib.programs.clsRecoverSegment_triples import RecoveryTripletsFactory
 
 logger = gplog.get_default_logger()
 
-# -------------------------------------------------------------------------
-
-class RemoteQueryCommand(Command):
-    def __init__(self, qname, query, hostname, port, dbname=None):
-        self.qname = qname
-        self.query = query
-        self.hostname = hostname
-        self.port = port
-        self.dbname = dbname or os.environ.get('PGDATABASE', None) or 'template1'
-        self.res = None
-
-    def get_results(self):
-        return self.res
-
-    def run(self):
-        logger.debug('Executing query (%s:%s) for segment (%s:%s) on database (%s)' % (
-            self.qname, self.query, self.hostname, self.port, self.dbname))
-        with closing(dbconn.connect(dbconn.DbURL(hostname=self.hostname, port=self.port, dbname=self.dbname),
-                            utility=True)) as conn:
-            self.res = dbconn.query(conn, self.query).fetchall()
-# -------------------------------------------------------------------------
 
 class GpRecoverSegmentProgram:
     #
@@ -78,6 +57,7 @@ class GpRecoverSegmentProgram:
         self.__options = options
         self.__pool = None
         self.logger = logger
+        self.termination_requested = False
 
         # If user did not specify a value for showProgressInplace and
         # stdout is a tty then send escape sequences to gprecoverseg
@@ -123,8 +103,8 @@ class GpRecoverSegmentProgram:
         if self.__options.rebalanceSegments:
             return GpSegmentRebalanceOperation(gpEnv, gpArray, self.__options.parallelDegree, self.__options.parallelPerHost)
         else:
-            instance = RecoveryTripletsFactory.instance(gpArray, self.__options.recoveryConfigFile, self.__options.newRecoverHosts)
-            segs = [GpMirrorToBuild(t.failed, t.live, t.failover, self.__options.forceFullResynchronization) for t in instance.getTriplets()]
+            instance = RecoveryTripletsFactory.instance(gpArray, self.__options.recoveryConfigFile, self.__options.newRecoverHosts, self.__options.parallelDegree)
+            segs = [GpMirrorToBuild(t.failed, t.live, t.failover, self.__options.forceFullResynchronization, self.__options.differentialResynchronization) for t in instance.getTriplets()]
             return GpMirrorListToBuild(segs, self.__pool, self.__options.quiet,
                                        self.__options.parallelDegree,
                                        instance.getInterfaceHostnameWarnings(),
@@ -144,7 +124,7 @@ class GpRecoverSegmentProgram:
                 operation.get_ret()
         except:
             self.logger.exception('Syncing of Greenplum Database extensions has failed.')
-            self.logger.warning('Please run gppkg --clean after successful segment recovery.')
+            self.logger.warning('Please run `gppkg install --force <package>` to re-install gppkg packages after successful segment recovery.')
 
     def displayRecovery(self, mirrorBuilder, gpArray):
         self.logger.info('Greenplum instance recovery parameters')
@@ -184,7 +164,11 @@ class GpRecoverSegmentProgram:
 
                 tabLog = TableLogger()
 
-                syncMode = "Full" if toRecover.isFullSynchronization() else "Incremental"
+                syncMode = "Incremental"
+                if toRecover.isFullSynchronization():
+                    syncMode = "Full"
+                elif toRecover.isDifferentialSynchronization():
+                    syncMode = "Differential"
                 tabLog.info(["Synchronization mode", "= " + syncMode])
                 programIoUtils.appendSegmentInfoForOutput("Failed", gpArray, toRecover.getFailedSegment(), tabLog)
                 programIoUtils.appendSegmentInfoForOutput("Recovery Source", gpArray, toRecover.getLiveSegment(),
@@ -258,8 +242,18 @@ class GpRecoverSegmentProgram:
             optionCnt += 1
         if self.__options.rebalanceSegments:
             optionCnt += 1
+        if self.__options.differentialResynchronization:
+            optionCnt += 1
         if optionCnt > 1:
-            raise ProgramArgumentValidationException("Only one of -i, -p, and -r may be specified")
+            raise ProgramArgumentValidationException("Only one of -i, -p, -r and --differential may be specified")
+
+        # verify "mode to recover" options
+        if self.__options.forceFullResynchronization and self.__options.differentialResynchronization:
+            raise ProgramArgumentValidationException("Only one of -F and --differential may be specified")
+
+        # verify differential supported options
+        if self.__options.differentialResynchronization and self.__options.outputSampleConfigFile:
+            raise ProgramArgumentValidationException("Invalid -o provided with --differential argument")
 
         faultProberInterface.getFaultProber().initializeProber(gpEnv.getCoordinatorPort())
 
@@ -274,14 +268,7 @@ class GpRecoverSegmentProgram:
         num_workers = min(len(gpArray.get_hostlist()), self.__options.parallelDegree)
         hosts = set(gpArray.get_hostlist(includeCoordinator=False))
         unreachable_hosts = get_unreachable_segment_hosts(hosts, num_workers)
-        for i, segmentPair in enumerate(gpArray.segmentPairs):
-            if segmentPair.primaryDB.getSegmentHostName() in unreachable_hosts:
-                logger.warning("Not recovering segment %d because %s is unreachable" % (segmentPair.primaryDB.dbid, segmentPair.primaryDB.getSegmentHostName()))
-                gpArray.segmentPairs[i].primaryDB.unreachable = True
-
-            if segmentPair.mirrorDB.getSegmentHostName() in unreachable_hosts:
-                logger.warning("Not recovering segment %d because %s is unreachable" % (segmentPair.mirrorDB.dbid, segmentPair.mirrorDB.getSegmentHostName()))
-                gpArray.segmentPairs[i].mirrorDB.unreachable = True
+        update_unreachable_flag_for_segments(gpArray, unreachable_hosts)
 
         # We have phys-rep/filerep mirrors.
 
@@ -335,6 +322,7 @@ class GpRecoverSegmentProgram:
         elif len(mirrorBuilder.getMirrorsToBuild()) == 0:
             self.logger.info('No segments to recover')
         else:
+            #TODO this already happens in buildMirrors function
             mirrorBuilder.checkForPortAndDirectoryConflicts(gpArray)
             self.validate_heap_checksum_consistency(gpArray, mirrorBuilder)
 
@@ -353,10 +341,45 @@ class GpRecoverSegmentProgram:
 
             contentsToUpdate = [seg.getLiveSegment().getSegmentContentId() for seg in mirrorBuilder.getMirrorsToBuild()]
             update_pg_hba_on_segments(gpArray, self.__options.hba_hostnames, self.__options.parallelDegree, contentsToUpdate)
-            if not mirrorBuilder.buildMirrors("recover", gpEnv, gpArray):
+
+            def signal_handler(sig, frame):
+                signal_name = signal.Signals(sig).name
+                logger.warn("Recieved {0} signal, terminating gprecoverseg".format(signal_name))
+
+                # Confirm with the user if they really want to terminate with CTRL-C.
+                if signal_name == "SIGINT":
+                    prompt_text = "\nIt is not recommended to terminate a recovery procedure midway. However, if you choose to proceed, you will need " \
+                                  "to run either gprecoverseg --differential or gprecoverseg -F to start a new recovery process the next time."
+
+                    if not userinput.ask_yesno(prompt_text, "Continue terminating gprecoverseg", 'N'):
+                        return
+
+                self.termination_requested = True
+                self.shutdown(current_hosts)
+
+                # Reset the signal handlers
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+
+            # SSH disconnections send a SIGHUP signal to all the processes running in that session.
+            # Ignoring this signal so that gprecoverseg does not terminate due to such issues.
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+            if not mirrorBuilder.recover_mirrors(gpEnv, gpArray):
+                if self.termination_requested:
+                    self.logger.error("gprecoverseg process was interrupted by the user.")
+                if self.__options.differentialResynchronization:
+                    self.logger.error("gprecoverseg differential recovery failed. Please check the gpsegrecovery.py log"
+                                      " file and rsync log file for more details.")
+                else:
+                    self.logger.error("gprecoverseg failed. Please check the output for more details.")
                 sys.exit(1)
 
-            self.trigger_fts_probe(port=gpEnv.getCoordinatorPort())
+            if self.termination_requested:
+                self.logger.info("Not able to terminate the recovery process since it has been completed successfully.")
 
             self.logger.info("********************************")
             self.logger.info("Segments successfully recovered.")
@@ -367,25 +390,15 @@ class GpRecoverSegmentProgram:
 
         sys.exit(0)
 
-    def trigger_fts_probe(self, port=0):
-        self.logger.info('Triggering FTS probe')
-        conn = dbconn.connect(dbconn.DbURL(port=port))
-
-        # XXX Perform two probe scans in a row, to work around a known
-        # race where gp_request_fts_probe_scan() can return early during the
-        # first call. Remove this duplication once that race is fixed.
-        for _ in range(2):
-            dbconn.execSQL(conn,"SELECT gp_request_fts_probe_scan()")
-        conn.close()
-
     def validate_heap_checksum_consistency(self, gpArray, mirrorBuilder):
         live_segments = [target.getLiveSegment() for target in mirrorBuilder.getMirrorsToBuild()]
+        failed_segments = [target.getFailedSegment() for target in mirrorBuilder.getMirrorsToBuild()]
         if len(live_segments) == 0:
             self.logger.info("No checksum validation necessary when there are no segments to recover.")
             return
 
         heap_checksum = HeapChecksum(gpArray, num_workers=min(self.__options.parallelDegree, len(live_segments)), logger=self.logger)
-        successes, failures = heap_checksum.get_segments_checksum_settings(live_segments)
+        successes, failures = heap_checksum.get_segments_checksum_settings(live_segments + failed_segments)
         # go forward if we have at least one segment that has replied
         if len(successes) == 0:
             raise Exception("No segments responded to ssh query for heap checksum validation.")
@@ -407,6 +420,20 @@ class GpRecoverSegmentProgram:
             self.__pool.haltWork()  # \  MPP-13489, CR-2572
             self.__pool.joinWorkers()  # > all three of these appear necessary
             self.__pool.join()  # /  see MPP-12633, CR-2252 as well
+
+    def shutdown(self, hosts):
+        
+        # Clear out the existing pool to stop any pending recovery process
+        while not self.__pool.isDone():
+
+            for host in hosts:
+                try:
+                    logger.debug("Terminating recovery process on host {0}".format(host))
+                    cmd = Command(name="terminate recovery process",
+                                cmdStr="ps ux | grep -E 'gpsegsetuprecovery|gpsegrecovery' | grep -vE 'ssh|grep|bash' | awk '{print $ 2}' | xargs -r kill", remoteHost=host, ctxt=REMOTE)
+                    cmd.run(validateAfter=True)
+                except ExecutionError as e:
+                    logger.error("Not able to terminate recovery process on host {0}: {1}".format(host, e))
 
     # -------------------------------------------------------------------------
 
@@ -458,6 +485,10 @@ class GpRecoverSegmentProgram:
                          dest="forceFullResynchronization",
                          metavar="<forceFullResynchronization>",
                          help="Force full segment resynchronization")
+        addTo.add_option('--differential', None, default=False, action='store_true',
+                         dest="differentialResynchronization",
+                         metavar="<differentialResynchronization>",
+                         help="differential segment resynchronization")
         addTo.add_option("-B", None, type="int", default=gp.DEFAULT_COORDINATOR_NUM_WORKERS,
                          dest="parallelDegree",
                          metavar="<parallelDegree>",
